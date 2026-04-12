@@ -45,6 +45,20 @@ spec:
                   name: {{ include "openab.agentFullname" $d }}
                   key: discord-bot-token
             {{- end }}
+            {{- if and ($cfg.slack).enabled ($cfg.slack).botToken }}
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "openab.agentFullname" $d }}
+                  key: slack-bot-token
+            {{- end }}
+            {{- if and ($cfg.slack).enabled ($cfg.slack).appToken }}
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "openab.agentFullname" $d }}
+                  key: slack-app-token
+            {{- end }}
             {{- if and ($cfg.stt).enabled ($cfg.stt).apiKey }}
             - name: STT_API_KEY
               valueFrom:

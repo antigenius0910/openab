@@ -60,6 +60,12 @@ agents:
         - "YOUR_CHANNEL_ID"
       # ⚠️ Use --set-string for user IDs to avoid float64 precision loss
       allowedUsers: []  # empty = allow all users (default)
+    slack:
+      enabled: false
+      botToken: ""       # Bot User OAuth Token (xoxb-...)
+      appToken: ""       # App-Level Token (xapp-...) for Socket Mode
+      allowedChannels: []  # empty = allow all channels
+      allowedUsers: []     # empty = allow all users
     workingDir: /home/agent
     env: {}
     envFrom: []
