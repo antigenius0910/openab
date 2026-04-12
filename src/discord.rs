@@ -1,6 +1,7 @@
 use crate::acp::ContentBlock;
 use crate::adapter::{AdapterRouter, ChatAdapter, ChannelRef, MessageRef, SenderContext};
 use crate::config::SttConfig;
+use crate::format;
 use crate::media;
 use async_trait::async_trait;
 use std::sync::LazyLock;
@@ -308,7 +309,7 @@ async fn get_or_create_thread(
         }
     }
 
-    let thread_name = shorten_thread_name(prompt);
+    let thread_name = format::shorten_thread_name(prompt);
     let parent = ChannelRef {
         platform: "discord".into(),
         channel_id: msg.channel_id.get().to_string(),
@@ -327,13 +328,3 @@ fn strip_mention(content: &str) -> String {
     MENTION_RE.replace_all(content, "").trim().to_string()
 }
 
-fn shorten_thread_name(prompt: &str) -> String {
-    let re = regex::Regex::new(r"https?://github\.com/([^/]+/[^/]+)/(issues|pull)/(\d+)").unwrap();
-    let shortened = re.replace_all(prompt, "$1#$3");
-    let name: String = shortened.chars().take(40).collect();
-    if name.len() < shortened.len() {
-        format!("{name}...")
-    } else {
-        name
-    }
-}

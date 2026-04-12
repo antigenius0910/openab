@@ -43,6 +43,21 @@ pub fn split_message(text: &str, limit: usize) -> Vec<String> {
     chunks
 }
 
+/// Shorten a prompt into a thread title: collapse GitHub URLs and cap at 40 chars.
+pub fn shorten_thread_name(prompt: &str) -> String {
+    use std::sync::LazyLock;
+    static GH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"https?://github\.com/([^/]+/[^/]+)/(issues|pull)/(\d+)").unwrap()
+    });
+    let shortened = GH_RE.replace_all(prompt, "$1#$3");
+    let name: String = shortened.chars().take(40).collect();
+    if name.len() < shortened.len() {
+        format!("{name}...")
+    } else {
+        name
+    }
+}
+
 /// Truncate a string to at most `limit` Unicode characters.
 /// Discord's message limit counts Unicode characters, not bytes.
 pub fn truncate_chars(s: &str, limit: usize) -> &str {

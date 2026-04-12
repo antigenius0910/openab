@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
 
@@ -71,6 +71,32 @@ impl SlackAdapter {
             return Err(anyhow!("Slack API {method}: {err}"));
         }
         Ok(json)
+    }
+
+    /// Resolve a Slack user ID to display name via users.info API.
+    async fn resolve_user_name(&self, user_id: &str) -> Option<String> {
+        let resp = self
+            .api_post(
+                "users.info",
+                serde_json::json!({ "user": user_id }),
+            )
+            .await
+            .ok()?;
+        let user = resp.get("user")?;
+        // Prefer display_name from profile, fallback to real_name, then name
+        let profile = user.get("profile")?;
+        let display = profile
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let real = profile
+            .get("real_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let name = user
+            .get("name")
+            .and_then(|v| v.as_str());
+        Some(display.or(real).or(name)?.to_string())
     }
 }
 
@@ -214,17 +240,43 @@ pub async fn run_slack_adapter(
                             // Route events
                             if envelope["type"].as_str() == Some("events_api") {
                                 let event = &envelope["payload"]["event"];
-                                if event["type"].as_str() == Some("app_mention") {
-                                    handle_app_mention(
-                                        event,
-                                        &adapter,
-                                        &bot_token,
-                                        &allowed_channels,
-                                        &allowed_users,
-                                        &stt_config,
-                                        &router,
-                                    )
-                                    .await;
+                                let event_type = event["type"].as_str().unwrap_or("");
+                                match event_type {
+                                    "app_mention" => {
+                                        handle_message(
+                                            event,
+                                            true,
+                                            &adapter,
+                                            &bot_token,
+                                            &allowed_channels,
+                                            &allowed_users,
+                                            &stt_config,
+                                            &router,
+                                        )
+                                        .await;
+                                    }
+                                    "message" => {
+                                        // Handle thread follow-ups without @mention.
+                                        // Skip bot messages and subtypes (join/leave/edits).
+                                        let has_thread = event["thread_ts"].is_string();
+                                        let is_bot = event["bot_id"].is_string()
+                                            || event["subtype"].as_str() == Some("bot_message");
+                                        let has_subtype = event["subtype"].is_string();
+                                        if has_thread && !is_bot && !has_subtype {
+                                            handle_message(
+                                                event,
+                                                false,
+                                                &adapter,
+                                                &bot_token,
+                                                &allowed_channels,
+                                                &allowed_users,
+                                                &stt_config,
+                                                &router,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -273,8 +325,9 @@ async fn get_socket_mode_url(app_token: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("no url in apps.connections.open response"))
 }
 
-async fn handle_app_mention(
+async fn handle_message(
     event: &serde_json::Value,
+    is_mention: bool,
     adapter: &Arc<SlackAdapter>,
     bot_token: &str,
     allowed_channels: &HashSet<String>,
@@ -300,7 +353,7 @@ async fn handle_app_mention(
     };
     let thread_ts = event["thread_ts"].as_str().map(|s| s.to_string());
 
-    // Check allowed channels (empty = deny all, secure by default per #91)
+    // Check allowed channels (empty = allow all)
     if !allowed_channels.is_empty() && !allowed_channels.contains(&channel_id) {
         return;
     }
@@ -321,8 +374,12 @@ async fn handle_app_mention(
         return;
     }
 
-    // Strip bot mention (<@UBOTID>) from text
-    let prompt = strip_slack_mention(&text);
+    // Strip bot mention from text only for @mention events
+    let prompt = if is_mention {
+        strip_slack_mention(&text)
+    } else {
+        text.trim().to_string()
+    };
 
     // Process file attachments (images, audio)
     let files = event["files"].as_array();
@@ -379,11 +436,17 @@ async fn handle_app_mention(
         }
     }
 
+    // Resolve Slack display name (best-effort, fallback to user_id)
+    let display_name = adapter
+        .resolve_user_name(&user_id)
+        .await
+        .unwrap_or_else(|| user_id.clone());
+
     let sender = SenderContext {
         schema: "openab.sender.v1".into(),
         sender_id: user_id.clone(),
-        sender_name: user_id.clone(),
-        display_name: user_id.clone(),
+        sender_name: display_name.clone(),
+        display_name,
         channel: "slack".into(),
         channel_id: channel_id.clone(),
         is_bot: false,
@@ -416,7 +479,9 @@ async fn handle_app_mention(
     }
 }
 
+static SLACK_MENTION_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"<@[A-Z0-9]+>").unwrap());
+
 fn strip_slack_mention(text: &str) -> String {
-    let re = regex::Regex::new(r"<@[A-Z0-9]+>").unwrap();
-    re.replace_all(text, "").trim().to_string()
+    SLACK_MENTION_RE.replace_all(text, "").trim().to_string()
 }
