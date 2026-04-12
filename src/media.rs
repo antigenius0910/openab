@@ -182,11 +182,6 @@ pub fn is_audio_mime(mime: &str) -> bool {
     mime.starts_with("audio/")
 }
 
-/// Check if a MIME type is an image we can process.
-pub fn is_image_mime(mime: &str) -> bool {
-    mime.starts_with("image/")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

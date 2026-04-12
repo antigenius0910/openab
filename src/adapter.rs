@@ -25,12 +25,6 @@ pub struct ChannelRef {
     pub parent_id: Option<String>,
 }
 
-impl ChannelRef {
-    pub fn is_thread(&self) -> bool {
-        self.thread_id.is_some() || self.parent_id.is_some()
-    }
-}
-
 /// Identifies a message across platforms.
 #[derive(Clone, Debug)]
 pub struct MessageRef {
@@ -96,10 +90,6 @@ impl AdapterRouter {
             pool,
             reactions_config,
         }
-    }
-
-    pub fn pool(&self) -> &SessionPool {
-        &self.pool
     }
 
     /// Handle an incoming user message. The adapter is responsible for
