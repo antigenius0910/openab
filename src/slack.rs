@@ -5,14 +5,17 @@ use crate::media;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
+use tokio::sync::watch;
 use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
 
 const SLACK_API: &str = "https://slack.com/api";
 
 /// Map Unicode emoji to Slack short names for reactions API.
+/// Only covers the default `[reactions.emojis]` set. Custom emoji configured
+/// outside this map will fall back to `grey_question`.
 fn unicode_to_slack_emoji(unicode: &str) -> &str {
     match unicode {
         "👀" => "eyes",
@@ -42,9 +45,14 @@ fn unicode_to_slack_emoji(unicode: &str) -> &str {
 
 // --- SlackAdapter: implements ChatAdapter for Slack ---
 
+/// TTL for cached user display names (5 minutes).
+const USER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub struct SlackAdapter {
     client: reqwest::Client,
     bot_token: String,
+    bot_user_id: tokio::sync::OnceCell<String>,
+    user_cache: tokio::sync::Mutex<HashMap<String, (String, tokio::time::Instant)>>,
 }
 
 impl SlackAdapter {
@@ -52,7 +60,21 @@ impl SlackAdapter {
         Self {
             client: reqwest::Client::new(),
             bot_token,
+            bot_user_id: tokio::sync::OnceCell::new(),
+            user_cache: tokio::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Get the bot's own Slack user ID (cached after first call).
+    async fn get_bot_user_id(&self) -> Option<&str> {
+        self.bot_user_id.get_or_try_init(|| async {
+            let resp = self.api_post("auth.test", serde_json::json!({})).await
+                .map_err(|e| anyhow!("auth.test failed: {e}"))?;
+            resp["user_id"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow!("no user_id in auth.test response"))
+        }).await.ok().map(|s| s.as_str())
     }
 
     async fn api_post(&self, method: &str, body: serde_json::Value) -> Result<serde_json::Value> {
@@ -74,7 +96,18 @@ impl SlackAdapter {
     }
 
     /// Resolve a Slack user ID to display name via users.info API.
+    /// Results are cached for 5 minutes to avoid hitting Slack rate limits.
     async fn resolve_user_name(&self, user_id: &str) -> Option<String> {
+        // Check cache first
+        {
+            let cache = self.user_cache.lock().await;
+            if let Some((name, ts)) = cache.get(user_id) {
+                if ts.elapsed() < USER_CACHE_TTL {
+                    return Some(name.clone());
+                }
+            }
+        }
+
         let resp = self
             .api_post(
                 "users.info",
@@ -83,7 +116,6 @@ impl SlackAdapter {
             .await
             .ok()?;
         let user = resp.get("user")?;
-        // Prefer display_name from profile, fallback to real_name, then name
         let profile = user.get("profile")?;
         let display = profile
             .get("display_name")
@@ -96,7 +128,15 @@ impl SlackAdapter {
         let name = user
             .get("name")
             .and_then(|v| v.as_str());
-        Some(display.or(real).or(name)?.to_string())
+        let resolved = display.or(real).or(name)?.to_string();
+
+        // Cache the result
+        self.user_cache.lock().await.insert(
+            user_id.to_string(),
+            (resolved.clone(), tokio::time::Instant::now()),
+        );
+
+        Some(resolved)
     }
 }
 
@@ -201,10 +241,17 @@ pub async fn run_slack_adapter(
     allowed_users: HashSet<String>,
     stt_config: SttConfig,
     router: Arc<AdapterRouter>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let adapter = Arc::new(SlackAdapter::new(bot_token.clone()));
 
     loop {
+        // Check for shutdown before (re)connecting
+        if *shutdown_rx.borrow() {
+            info!("Slack adapter shutting down");
+            return Ok(());
+        }
+
         let ws_url = match get_socket_mode_url(&app_token).await {
             Ok(url) => url,
             Err(e) => {
@@ -220,92 +267,110 @@ pub async fn run_slack_adapter(
                 info!("Slack Socket Mode connected");
                 let (mut write, mut read) = ws_stream.split();
 
-                while let Some(msg_result) = read.next().await {
-                    match msg_result {
-                        Ok(tungstenite::Message::Text(text)) => {
-                            let envelope: serde_json::Value =
-                                match serde_json::from_str(&text) {
-                                    Ok(v) => v,
-                                    Err(_) => continue,
-                                };
+                loop {
+                    tokio::select! {
+                        msg_result = read.next() => {
+                            let Some(msg_result) = msg_result else { break };
+                            match msg_result {
+                                Ok(tungstenite::Message::Text(text)) => {
+                                    let envelope: serde_json::Value =
+                                        match serde_json::from_str(&text) {
+                                            Ok(v) => v,
+                                            Err(_) => continue,
+                                        };
 
-                            // Acknowledge the envelope immediately
-                            if let Some(envelope_id) = envelope["envelope_id"].as_str() {
-                                let ack = serde_json::json!({"envelope_id": envelope_id});
-                                let _ = write
-                                    .send(tungstenite::Message::Text(ack.to_string()))
-                                    .await;
-                            }
-
-                            // Route events
-                            if envelope["type"].as_str() == Some("events_api") {
-                                let event = &envelope["payload"]["event"];
-                                let event_type = event["type"].as_str().unwrap_or("");
-                                match event_type {
-                                    "app_mention" => {
-                                        handle_message(
-                                            event,
-                                            true,
-                                            &adapter,
-                                            &bot_token,
-                                            &allowed_channels,
-                                            &allowed_users,
-                                            &stt_config,
-                                            &router,
-                                        )
-                                        .await;
-                                    }
-                                    "message" => {
-                                        // Handle thread follow-ups without @mention.
-                                        // Skip bot messages and subtypes that aren't real user messages.
-                                        let has_thread = event["thread_ts"].is_string();
-                                        let is_bot = event["bot_id"].is_string()
-                                            || event["subtype"].as_str() == Some("bot_message");
-                                        let subtype = event["subtype"].as_str().unwrap_or("");
-                                        let has_files = event["files"].is_array();
-                                        debug!(
-                                            has_thread,
-                                            is_bot,
-                                            subtype,
-                                            has_files,
-                                            text = event["text"].as_str().unwrap_or(""),
-                                            "message event received"
-                                        );
-                                        let skip_subtype = matches!(subtype,
-                                            "message_changed" | "message_deleted" |
-                                            "channel_join" | "channel_leave" |
-                                            "channel_topic" | "channel_purpose"
-                                        );
-                                        if has_thread && !is_bot && !skip_subtype {
-                                            handle_message(
-                                                event,
-                                                false,
-                                                &adapter,
-                                                &bot_token,
-                                                &allowed_channels,
-                                                &allowed_users,
-                                                &stt_config,
-                                                &router,
-                                            )
+                                    // Acknowledge the envelope immediately
+                                    if let Some(envelope_id) = envelope["envelope_id"].as_str() {
+                                        let ack = serde_json::json!({"envelope_id": envelope_id});
+                                        let _ = write
+                                            .send(tungstenite::Message::Text(ack.to_string()))
                                             .await;
+                                    }
+
+                                    // Route events
+                                    if envelope["type"].as_str() == Some("events_api") {
+                                        let event = &envelope["payload"]["event"];
+                                        let event_type = event["type"].as_str().unwrap_or("");
+                                        match event_type {
+                                            "app_mention" => {
+                                                handle_message(
+                                                    event,
+                                                    true,
+                                                    &adapter,
+                                                    &bot_token,
+                                                    &allowed_channels,
+                                                    &allowed_users,
+                                                    &stt_config,
+                                                    &router,
+                                                )
+                                                .await;
+                                            }
+                                            "message" => {
+                                                // Handle thread follow-ups without @mention.
+                                                // Skip bot messages and subtypes that aren't real user messages.
+                                                let has_thread = event["thread_ts"].is_string();
+                                                let is_bot = event["bot_id"].is_string()
+                                                    || event["subtype"].as_str() == Some("bot_message");
+                                                let subtype = event["subtype"].as_str().unwrap_or("");
+                                                let has_files = event["files"].is_array();
+                                                // Skip messages that @mention the bot — app_mention handles those
+                                                let msg_text = event["text"].as_str().unwrap_or("");
+                                                let mentions_bot = if let Some(bot_id) = adapter.get_bot_user_id().await {
+                                                    msg_text.contains(&format!("<@{bot_id}>"))
+                                                } else {
+                                                    false
+                                                };
+                                                debug!(
+                                                    has_thread,
+                                                    is_bot,
+                                                    subtype,
+                                                    has_files,
+                                                    mentions_bot,
+                                                    text = msg_text,
+                                                    "message event received"
+                                                );
+                                                let skip_subtype = matches!(subtype,
+                                                    "message_changed" | "message_deleted" |
+                                                    "channel_join" | "channel_leave" |
+                                                    "channel_topic" | "channel_purpose"
+                                                );
+                                                if has_thread && !is_bot && !skip_subtype && !mentions_bot {
+                                                    handle_message(
+                                                        event,
+                                                        false,
+                                                        &adapter,
+                                                        &bot_token,
+                                                        &allowed_channels,
+                                                        &allowed_users,
+                                                        &stt_config,
+                                                        &router,
+                                                    )
+                                                    .await;
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
-                                    _ => {}
                                 }
+                                Ok(tungstenite::Message::Ping(data)) => {
+                                    let _ = write.send(tungstenite::Message::Pong(data)).await;
+                                }
+                                Ok(tungstenite::Message::Close(_)) => {
+                                    warn!("Slack Socket Mode connection closed by server");
+                                    break;
+                                }
+                                Err(e) => {
+                                    error!("Socket Mode read error: {e}");
+                                    break;
+                                }
+                                _ => {}
                             }
                         }
-                        Ok(tungstenite::Message::Ping(data)) => {
-                            let _ = write.send(tungstenite::Message::Pong(data)).await;
+                        _ = shutdown_rx.changed() => {
+                            info!("Slack adapter received shutdown signal");
+                            let _ = write.send(tungstenite::Message::Close(None)).await;
+                            return Ok(());
                         }
-                        Ok(tungstenite::Message::Close(_)) => {
-                            warn!("Slack Socket Mode connection closed by server");
-                            break;
-                        }
-                        Err(e) => {
-                            error!("Socket Mode read error: {e}");
-                            break;
-                        }
-                        _ => {}
                     }
                 }
             }

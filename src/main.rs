@@ -74,6 +74,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Shutdown signal for Slack adapter
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     // Spawn Slack adapter (background task)
     let slack_handle = if let Some(slack_cfg) = cfg.slack {
         info!(
@@ -91,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
                 slack_cfg.allowed_users.into_iter().collect(),
                 stt,
                 router,
+                shutdown_rx,
             )
             .await
             {
@@ -117,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
             allowed_channels,
             allowed_users,
             stt_config: cfg.stt.clone(),
+            adapter: std::sync::OnceLock::new(),
         };
 
         let intents = GatewayIntents::GUILD_MESSAGES
@@ -146,8 +151,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Cleanup
     cleanup_handle.abort();
+    // Signal Slack adapter to shut down gracefully
+    let _ = shutdown_tx.send(true);
     if let Some(handle) = slack_handle {
-        handle.abort();
+        // Give Slack adapter time to close WebSocket cleanly
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
     }
     let shutdown_pool = pool;
     shutdown_pool.shutdown().await;

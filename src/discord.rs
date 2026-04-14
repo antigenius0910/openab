@@ -12,7 +12,7 @@ use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, MessageId};
 use serenity::prelude::*;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::{debug, error, info};
 
 // --- DiscordAdapter: implements ChatAdapter for Discord via serenity ---
@@ -116,6 +116,7 @@ pub struct Handler {
     pub allowed_channels: HashSet<u64>,
     pub allowed_users: HashSet<u64>,
     pub stt_config: SttConfig,
+    pub adapter: OnceLock<Arc<dyn ChatAdapter>>,
 }
 
 #[serenity::async_trait]
@@ -125,7 +126,9 @@ impl EventHandler for Handler {
             return;
         }
 
-        let adapter: Arc<dyn ChatAdapter> = Arc::new(DiscordAdapter::new(ctx.http.clone()));
+        let adapter = self.adapter.get_or_init(|| {
+            Arc::new(DiscordAdapter::new(ctx.http.clone()))
+        }).clone();
         let bot_id = ctx.cache.current_user().id;
 
         let channel_id = msg.channel_id.get();

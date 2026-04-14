@@ -58,7 +58,7 @@ agents:
       - acp
       - --trust-all-tools
     discord:
-      enabled: true
+      enabled: true      # set to false to disable; enabled with empty botToken is treated as disabled
       botToken: ""
       # ⚠️ Use --set-string for channel IDs to avoid float64 precision loss
       allowedChannels:
