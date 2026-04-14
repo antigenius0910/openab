@@ -404,6 +404,7 @@ async fn get_socket_mode_url(app_token: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("no url in apps.connections.open response"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_message(
     event: &serde_json::Value,
     is_mention: bool,
@@ -462,7 +463,7 @@ async fn handle_message(
 
     // Process file attachments (images, audio)
     let files = event["files"].as_array();
-    let has_files = files.map_or(false, |f| !f.is_empty());
+    let has_files = files.is_some_and(|f| !f.is_empty());
 
     if prompt.is_empty() && !has_files {
         return;
