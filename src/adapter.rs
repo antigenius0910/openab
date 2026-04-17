@@ -60,9 +60,6 @@ pub trait ChatAdapter: Send + Sync + 'static {
     /// Send a new message, returns a reference to the sent message.
     async fn send_message(&self, channel: &ChannelRef, content: &str) -> Result<MessageRef>;
 
-    /// Edit an existing message in-place.
-    async fn edit_message(&self, msg: &MessageRef, content: &str) -> Result<()>;
-
     /// Create a thread from a trigger message, returns the thread channel ref.
     async fn create_thread(
         &self,
