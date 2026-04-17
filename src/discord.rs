@@ -361,6 +361,7 @@ impl EventHandler for Handler {
             display_name: display_name.to_string(),
             channel: "discord".into(),
             channel_id: msg.channel_id.to_string(),
+            thread_id: None,
             is_bot: msg.author.bot,
         };
 
