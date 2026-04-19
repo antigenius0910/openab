@@ -127,6 +127,16 @@ Empty (default) = any bot can pass through (subject to the mode check).
 
 Role mentions are ignored because they are shared across bots and cause false positives in multi-bot setups. This is intentional since v0.7.8-beta.3 (#420, #440).
 
+### User mention UIDs
+
+When a user mentions another user (e.g. `@SomeUser`) in a message to the bot, the raw Discord mention `<@UID>` is preserved in the prompt sent to the LLM. This means:
+
+- The LLM can copy `<@UID>` into its reply to produce a clickable Discord mention
+- The bot's own mention is stripped (so the bot doesn't see itself being triggered)
+- Role mentions are replaced with `@(role)` placeholder
+
+To help the LLM know who each UID refers to, provide a UID→name mapping via system prompt or context entry (see [Multi-Bot Setup](#multi-bot-setup) below).
+
 ---
 
 ## Thread Behavior
@@ -171,6 +181,22 @@ To enable bots to collaborate (e.g. code review → deploy handoff):
 [discord]
 allow_bot_messages = "mentions"
 ```
+
+### Ice-breaking: teaching bots who's in the room
+
+Since user mentions are preserved as raw `<@UID>`, bots need a UID→name mapping to know who is who. Add an ice-breaking greeting to each bot's system prompt or context entry:
+
+```
+We have 3 participants in this room:
+
+MY_NICIKNAME    <@MY_NAME>
+BOT1_NICKNAME   <@BOT1>
+BOT2_NICKNAME   <@BOT2>
+
+Always use <@UID> format to mention someone in your messages.
+```
+
+This lets each bot build the mapping in its own context from the start and correctly mention others using `<@UID>`.
 
 See [multi-agent.md](multi-agent.md) for detailed examples.
 

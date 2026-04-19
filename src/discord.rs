@@ -10,7 +10,6 @@ use serenity::http::Http;
 use serenity::model::channel::{AutoArchiveDuration, Message, ReactionType};
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, MessageId, UserId};
-use serenity::model::user::User;
 use serenity::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -321,11 +320,7 @@ impl EventHandler for Handler {
             return;
         }
 
-        let prompt = if is_mentioned {
-            resolve_mentions(&msg.content, bot_id, &msg.mentions)
-        } else {
-            msg.content.trim().to_string()
-        };
+        let prompt = resolve_mentions(&msg.content, bot_id);
 
         // No text and no attachments → skip
         if prompt.is_empty() && msg.attachments.is_empty() {
@@ -474,28 +469,14 @@ async fn get_or_create_thread(
 static ROLE_MENTION_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"<@&\d+>").unwrap()
 });
-static USER_MENTION_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"<@!?\d+>").unwrap()
-});
 
-fn resolve_mentions(content: &str, bot_id: UserId, mentions: &[User]) -> String {
+fn resolve_mentions(content: &str, bot_id: UserId) -> String {
     // 1. Strip the bot's own trigger mention
-    let mut out = content
+    let out = content
         .replace(&format!("<@{}>", bot_id), "")
         .replace(&format!("<@!{}>", bot_id), "");
-    // 2. Resolve known user mentions to @DisplayName
-    for user in mentions {
-        if user.id == bot_id {
-            continue;
-        }
-        let label = user.global_name.as_deref().unwrap_or(&user.name);
-        let display = format!("@{}", label);
-        out = out
-            .replace(&format!("<@{}>", user.id), &display)
-            .replace(&format!("<@!{}>", user.id), &display);
-    }
-    // 3. Fallback: replace any remaining unresolved mentions
-    let out = ROLE_MENTION_RE.replace_all(&out, "@(role)");
-    let out = USER_MENTION_RE.replace_all(&out, "@(user)").to_string();
+    // 2. Other user mentions: keep <@UID> as-is so the LLM can mention back
+    // 3. Fallback: replace role mentions only (user mentions are preserved)
+    let out = ROLE_MENTION_RE.replace_all(&out, "@(role)").to_string();
     out.trim().to_string()
 }
