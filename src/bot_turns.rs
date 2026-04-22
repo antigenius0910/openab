@@ -7,10 +7,10 @@
 
 use std::collections::HashMap;
 
-/// Absolute per-thread cap on bot turns. Cannot be overridden by config or
-/// human intervention within the session's lifetime — a human must intervene
-/// and then a new bot turn can increment again from 0, but the hard counter
-/// also tracks the lifetime total and caps it regardless.
+/// Absolute per-thread cap on consecutive bot turns without human intervention.
+/// A human message resets both soft and hard counters to 0, allowing bots to
+/// resume. This is *not* a lifetime total — it guards against runaway loops
+/// between human resets.
 pub const HARD_BOT_TURN_LIMIT: u32 = 100;
 
 #[derive(Debug, PartialEq, Eq)]

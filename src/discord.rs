@@ -845,6 +845,10 @@ async fn get_or_create_thread(
 /// Detect Discord's "A thread has already been created for this message" error
 /// (JSON error code 160004). Triggered when two bots responding to the same
 /// @-mention race to create a thread from the same trigger message.
+///
+/// Uses string matching because serenity surfaces Discord API errors as
+/// formatted strings — there is no structured error code we can match on.
+/// Unit tests pin the expected patterns so serenity formatting changes are caught.
 fn is_thread_already_exists_error(err: &anyhow::Error) -> bool {
     let msg = err.to_string();
     msg.contains("160004") || msg.contains("already been created")

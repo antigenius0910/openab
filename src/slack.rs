@@ -664,6 +664,9 @@ pub async fn run_slack_adapter(
                                                 // count toward the per-thread limit. Matches Discord #483.
                                                 // Keyed on thread_ts when in a thread, else channel:ts (the
                                                 // same key shape used for per-thread queueing below).
+                                                // Non-thread messages get a unique key per message, so the
+                                                // counter never accumulates — intentional, because bot-to-bot
+                                                // loops only happen inside threads.
                                                 let turn_key = if let Some(thread_ts) = event["thread_ts"].as_str() {
                                                     thread_ts.to_string()
                                                 } else {
