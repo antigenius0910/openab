@@ -67,13 +67,10 @@ pub struct SlackAdapter {
     multibot_threads: tokio::sync::Mutex<HashMap<String, tokio::time::Instant>>,
     /// TTL for participation cache entries (matches session_ttl_hours from config).
     session_ttl: std::time::Duration,
-    /// Retained for API compatibility; streaming is now per-thread (#534).
-    #[allow(dead_code)]
-    allow_bot_messages: AllowBots,
 }
 
 impl SlackAdapter {
-    pub fn new(bot_token: String, session_ttl: std::time::Duration, allow_bot_messages: AllowBots) -> Self {
+    pub fn new(bot_token: String, session_ttl: std::time::Duration, _allow_bot_messages: AllowBots) -> Self {
         Self {
             client: reqwest::Client::new(),
             bot_token,
@@ -83,7 +80,6 @@ impl SlackAdapter {
             participated_threads: tokio::sync::Mutex::new(HashMap::new()),
             multibot_threads: tokio::sync::Mutex::new(HashMap::new()),
             session_ttl,
-            allow_bot_messages,
         }
     }
 

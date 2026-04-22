@@ -1345,9 +1345,8 @@ mod tests {
         }
     }
 
-    // --- use_streaming parity tests (regression for #533) ---
-    // Discord must mirror Slack: streaming only when allow_bot_messages=Off.
-    // Per-thread streaming: ON by default, OFF when another bot is present (#534).
+    // --- Per-thread streaming tests (#534) ---
+    // Streaming ON by default, OFF when another bot is detected in the thread.
 
     /// Single bot thread: streaming enabled.
     #[test]

@@ -83,6 +83,10 @@ pub trait ChatAdapter: Send + Sync + 'static {
     /// Whether this adapter should use streaming edit (true) or send-once (false).
     /// `other_bot_present` indicates if another bot has posted in the current thread.
     /// Streaming should be disabled in multi-bot threads to avoid edit interference.
+    /// NOTE: Slight race window exists — the multibot cache is checked before
+    /// handle_message, so a bot arriving between the check and the response will
+    /// not be detected until the next message. This is acceptable: the first
+    /// response may stream, but subsequent ones will correctly use send-once.
     fn use_streaming(&self, other_bot_present: bool) -> bool;
 }
 
