@@ -49,8 +49,8 @@ app.kubernetes.io/component: {{ .agent }}
      If existingSecret is set, reference it; otherwise fall back to the chart-managed agent secret.
      Call with: dict "ctx" $ "agent" $name "cfg" $cfg */}}
 {{- define "openab.slackSecretName" -}}
-{{- if and .cfg.slack .cfg.slack.existingSecret -}}
-{{- .cfg.slack.existingSecret -}}
+{{- if and .cfg.slack (.cfg.slack.existingSecret | default "" | trim) -}}
+{{- .cfg.slack.existingSecret | trim -}}
 {{- else -}}
 {{- include "openab.agentFullname" . -}}
 {{- end -}}
