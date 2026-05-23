@@ -20,6 +20,14 @@ fullnameOverride: ""
 # serviceAccountName: "openab"
 serviceAccountName: ""
 
+# Chart-global image pull secrets, used when an agent doesn't set its own
+# `imagePullSecrets`. Per-agent values (agents.<name>.imagePullSecrets) take
+# precedence — when set, they fully override (do not merge with) this list.
+# Example:
+# imagePullSecrets:
+#   - name: regcred
+imagePullSecrets: []
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
@@ -420,6 +428,12 @@ agents:
     # multi-agent deployments where only some agents need a dedicated SA.
     # serviceAccountName: "openab"
     serviceAccountName: ""
+    # Per-agent image pull secrets. When set, overrides the chart-global
+    # `imagePullSecrets` for this agent only. Useful in multi-agent deployments
+    # where only some agents pull from a private registry.
+    # imagePullSecrets:
+    #   - name: regcred
+    imagePullSecrets: []
     # extraInitContainers adds init containers to the pod (runs before the main container)
     extraInitContainers: []
     # extraContainers adds sidecar containers to the pod
