@@ -594,12 +594,14 @@ async fn dispatch_batch(
     let session_key = Dispatcher::session_key(thread_channel);
 
     // Apply 👀 reaction to every message in the batch before dispatch (§6.7).
-    // Sequential — batches are typically small (≤ low single digits) so the
-    // serialization cost is sub-second and not user-visible; sequential keeps the
-    // dispatch path free of `futures_util::join_all` and easier to reason about.
-    let queued_emoji = &target.reactions_config().emojis.queued;
-    for msg in batch.iter() {
-        let _ = adapter.add_reaction(&msg.trigger_msg, queued_emoji).await;
+    // Skip when assistant status API is active — uses
+    // assistant.threads.setStatus instead of emoji reactions.
+    let assistant_status = adapter.uses_assistant_status();
+    if !assistant_status {
+        let queued_emoji = &target.reactions_config().emojis.queued;
+        for msg in batch.iter() {
+            let _ = adapter.add_reaction(&msg.trigger_msg, queued_emoji).await;
+        }
     }
 
     // Collect per-event observability data (before consuming the batch).
@@ -654,22 +656,26 @@ async fn dispatch_batch(
         )
         .await;
 
-    match &result {
-        Ok(()) => reactions.set_done().await,
-        Err(_) => reactions.set_error().await,
-    }
+    // In assistant status mode, all status is conveyed via
+    // assistant.threads.setStatus — skip emoji reactions entirely.
+    if !assistant_status {
+        match &result {
+            Ok(()) => reactions.set_done().await,
+            Err(_) => reactions.set_error().await,
+        }
 
-    let hold_ms = if result.is_ok() {
-        reactions_config.timing.done_hold_ms
-    } else {
-        reactions_config.timing.error_hold_ms
-    };
-    if reactions_config.remove_after_reply {
-        let reactions = reactions;
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
-            reactions.clear().await;
-        });
+        let hold_ms = if result.is_ok() {
+            reactions_config.timing.done_hold_ms
+        } else {
+            reactions_config.timing.error_hold_ms
+        };
+        if reactions_config.remove_after_reply {
+            let reactions = reactions;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
+                reactions.clear().await;
+            });
+        }
     }
 
     if let Err(ref e) = result {

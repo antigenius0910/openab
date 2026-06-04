@@ -134,6 +134,9 @@ data:
     {{- if hasKey ($cfg.slack | default dict) "maxBatchTokens" }}
     max_batch_tokens = {{ ($cfg.slack).maxBatchTokens | int }}
     {{- end }}
+    {{- if ($cfg.slack).assistantMode }}
+    assistant_mode = true
+    {{- end }}
     {{- end }}
 
     [agent]

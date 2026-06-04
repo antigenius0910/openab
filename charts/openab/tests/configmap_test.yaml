@@ -158,3 +158,14 @@ tests:
       - notMatchRegex:
           path: data["config.toml"]
           pattern: 'inherit_env'
+
+  - it: renders slack assistant_mode when enabled
+    set:
+      agents.kiro.slack.enabled: true
+      agents.kiro.slack.botToken: xoxb-x
+      agents.kiro.slack.appToken: xapp-y
+      agents.kiro.slack.assistantMode: true
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'assistant_mode = true'

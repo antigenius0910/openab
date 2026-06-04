@@ -53,6 +53,16 @@ const USER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 /// Maximum entries in the participation cache before eviction.
 const PARTICIPATION_CACHE_MAX: usize = 1000;
 
+/// Maximum entries in the streams map before eviction (safety net for
+/// aborted turns that begin a stream but never reach stream_finish).
+const STREAM_CACHE_MAX: usize = 1024;
+
+#[derive(Default)]
+struct StreamEntry {
+    active: bool,
+    degraded_buf: String,
+}
+
 pub struct SlackAdapter {
     client: reqwest::Client,
     bot_token: String,
@@ -67,6 +77,15 @@ pub struct SlackAdapter {
     multibot_threads: tokio::sync::Mutex<HashMap<String, tokio::time::Instant>>,
     /// TTL for participation cache entries (matches session_ttl_hours from config).
     session_ttl: std::time::Duration,
+    /// Assistant mode: stream via chat.startStream + assistant.threads.setStatus.
+    assistant_mode: bool,
+    /// thread_ts → (recipient_user_id, recipient_team_id); chat.startStream
+    /// requires recipient_* for channel threads. Populated by handle_message.
+    trigger_recipients: tokio::sync::Mutex<HashMap<String, (String, String)>>,
+    /// streaming message ts → state. active=false = degraded (post+edit fallback).
+    /// Lifecycle: stream_begin inserts, stream_finish removes; insert_stream
+    /// bounds the map (STREAM_CACHE_MAX) as a safety net against aborted turns.
+    streams: tokio::sync::Mutex<HashMap<String, StreamEntry>>,
 }
 
 impl SlackAdapter {
@@ -74,6 +93,7 @@ impl SlackAdapter {
         bot_token: String,
         session_ttl: std::time::Duration,
         _allow_bot_messages: AllowBots,
+        assistant_mode: bool,
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -84,6 +104,9 @@ impl SlackAdapter {
             participated_threads: tokio::sync::Mutex::new(HashMap::new()),
             multibot_threads: tokio::sync::Mutex::new(HashMap::new()),
             session_ttl,
+            assistant_mode,
+            trigger_recipients: tokio::sync::Mutex::new(HashMap::new()),
+            streams: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -101,6 +124,53 @@ impl SlackAdapter {
             .entry(thread_ts.to_string())
             .or_insert_with(tokio::time::Instant::now);
         enforce_cache_bounds(&mut cache, self.session_ttl);
+    }
+
+    /// Record the recipient for a thread so stream_begin can supply
+    /// recipient_user_id/recipient_team_id to chat.startStream.
+    async fn note_trigger(&self, thread_ts: &str, user_id: &str, team_id: &str) {
+        if !self.assistant_mode {
+            return;
+        }
+        let mut map = self.trigger_recipients.lock().await;
+        map.insert(thread_ts.to_string(), (user_id.to_string(), team_id.to_string()));
+        if map.len() > PARTICIPATION_CACHE_MAX {
+            // Bound the map; eviction order is arbitrary, but a missed recipient is non-fatal
+            // (stream_begin falls back to degraded mode), so we keep this simple rather than
+            // mirroring enforce_cache_bounds' TTL/LRU.
+            let to_evict: Vec<String> = map.keys().take(map.len() / 2).cloned().collect();
+            for k in to_evict {
+                map.remove(&k);
+            }
+        }
+    }
+
+    async fn lookup_recipient(&self, thread_ts: &str) -> Option<(String, String)> {
+        self.trigger_recipients.lock().await.get(thread_ts).cloned()
+    }
+
+    /// Insert a stream entry, bounding the map so aborted turns (begin without a
+    /// matching finish) can't leak unboundedly. Normal lifecycle: stream_begin
+    /// inserts, stream_finish removes.
+    async fn insert_stream(&self, ts: String, entry: StreamEntry) {
+        let mut map = self.streams.lock().await;
+        if map.len() >= STREAM_CACHE_MAX {
+            let evict: Vec<String> = map.keys().take(map.len() / 2).cloned().collect();
+            for k in evict {
+                map.remove(&k);
+            }
+        }
+        map.insert(ts, entry);
+    }
+
+    /// Accumulate a delta into a degraded stream's buffer and return the new
+    /// cumulative text. Returns None if no (degraded) stream entry exists for
+    /// `ts` — never resurrects a removed/absent stream. No network I/O.
+    async fn accumulate_degraded(&self, ts: &str, delta: &str) -> Option<String> {
+        let mut map = self.streams.lock().await;
+        let entry = map.get_mut(ts)?;
+        entry.degraded_buf.push_str(delta);
+        Some(entry.degraded_buf.clone())
     }
 
     /// Get the bot's own Slack user ID (cached after first call).
@@ -464,6 +534,115 @@ impl ChatAdapter for SlackAdapter {
     fn use_streaming(&self, other_bot_present: bool) -> bool {
         !other_bot_present
     }
+
+    fn uses_assistant_status(&self) -> bool {
+        self.assistant_mode
+    }
+
+    fn uses_native_streaming(&self, other_bot_present: bool) -> bool {
+        let native = self.assistant_mode && !other_bot_present;
+        debug!(
+            assistant_mode = self.assistant_mode,
+            other_bot_present,
+            native,
+            "slack assistant_mode decision (per turn)"
+        );
+        native
+    }
+
+    async fn stream_begin(&self, channel: &ChannelRef) -> Result<MessageRef> {
+        let thread_ts = channel.thread_id.clone().unwrap_or_default();
+        let recipient = self.lookup_recipient(&thread_ts).await;
+        let make_ref = |ts: String| MessageRef {
+            channel: ChannelRef {
+                platform: "slack".into(),
+                channel_id: channel.channel_id.clone(),
+                thread_id: channel.thread_id.clone(),
+                parent_id: None,
+                origin_event_id: None,
+            },
+            message_id: ts,
+        };
+
+        if let Some((user_id, team_id)) = recipient {
+            let body = build_start_stream_body(&channel.channel_id, &thread_ts, &user_id, &team_id);
+            match self.api_post("chat.startStream", body).await {
+                Ok(resp) => {
+                    if let Some(ts) = resp["ts"].as_str() {
+                        self.insert_stream(
+                            ts.to_string(),
+                            StreamEntry { active: true, degraded_buf: String::new() },
+                        )
+                        .await;
+                        return Ok(make_ref(ts.to_string()));
+                    }
+                    error!("chat.startStream ok but no ts; falling back to post+edit");
+                }
+                Err(e) => {
+                    error!(error = %e, "chat.startStream failed; falling back to post+edit for this turn");
+                }
+            }
+        } else {
+            error!(thread_ts, "no recipient recorded for thread; falling back to post+edit");
+        }
+
+        // Degraded fallback: plain placeholder via send_message; mark inactive.
+        let msg = self.send_message(channel, "…").await?;
+        self.insert_stream(
+            msg.message_id.clone(),
+            StreamEntry { active: false, degraded_buf: String::new() },
+        )
+        .await;
+        Ok(msg)
+    }
+
+    async fn stream_append(&self, msg: &MessageRef, delta: &str) -> Result<()> {
+        let ts = &msg.message_id;
+        let active = {
+            let map = self.streams.lock().await;
+            map.get(ts).map(|e| e.active).unwrap_or(false)
+        };
+        if active {
+            let body = build_append_stream_body(&msg.channel.channel_id, ts, delta);
+            if let Err(e) = self.api_post("chat.appendStream", body).await {
+                warn!(error = %e, "chat.appendStream failed (cosmetic; final replace will correct)");
+            }
+        } else if let Some(cumulative) = self.accumulate_degraded(ts, delta).await {
+            let _ = self.edit_message(msg, &cumulative).await; // cosmetic mid-stream
+        }
+        Ok(())
+    }
+
+    async fn stream_finish(&self, msg: &MessageRef, final_content: &str) -> Result<()> {
+        let ts = &msg.message_id;
+        let active = {
+            let map = self.streams.lock().await;
+            map.get(ts).map(|e| e.active).unwrap_or(false)
+        };
+        if active {
+            let body = serde_json::json!({ "channel": msg.channel.channel_id, "ts": ts });
+            if let Err(e) = self.api_post("chat.stopStream", body).await {
+                error!(error = %e, "chat.stopStream failed");
+            }
+        }
+        if let Err(e) = self.edit_message(msg, final_content).await {
+            warn!(error = %e, "final chat.update failed; trying postMessage");
+            if let Err(e2) = self.send_message(&msg.channel, final_content).await {
+                error!(error = %e2, "final postMessage also failed; reply may be incomplete");
+            }
+        }
+        self.streams.lock().await.remove(ts);
+        Ok(())
+    }
+
+    async fn set_status(&self, channel: &ChannelRef, status: &str) -> Result<()> {
+        let thread_ts = channel.thread_id.clone().unwrap_or_default();
+        let body = build_set_status_body(&channel.channel_id, &thread_ts, status);
+        if let Err(e) = self.api_post("assistant.threads.setStatus", body).await {
+            warn!(error = %e, status, "assistant.threads.setStatus failed (cosmetic)");
+        }
+        Ok(())
+    }
 }
 
 // --- Socket Mode event loop ---
@@ -583,9 +762,14 @@ pub async fn run_slack_adapter(
                                                 let allowed_users = allowed_users.clone();
                                                 let stt_config = stt_config.clone();
                                                 let dispatcher = dispatcher.clone();
+                                                let team_id = envelope["payload"]["team_id"]
+                                                    .as_str()
+                                                    .unwrap_or("")
+                                                    .to_string();
                                                 tokio::spawn(async move {
                                                     handle_message(
                                                         &event,
+                                                        &team_id,
                                                         &adapter,
                                                         &bot_token,
                                                         allow_all_channels,
@@ -805,6 +989,10 @@ pub async fn run_slack_adapter(
                                                 // Dispatch to handle_message (per-thread serialization comes
                                                 // from Dispatcher consumer task in batched mode and from
                                                 // pool.with_connection in per-message mode).
+                                                let team_id = envelope["payload"]["team_id"]
+                                                    .as_str()
+                                                    .unwrap_or("")
+                                                    .to_string();
                                                 let event = event.clone();
                                                 let adapter = adapter.clone();
                                                 let bot_token = bot_token.clone();
@@ -815,6 +1003,7 @@ pub async fn run_slack_adapter(
                                                 tokio::spawn(async move {
                                                     handle_message(
                                                         &event,
+                                                        &team_id,
                                                         &adapter,
                                                         &bot_token,
                                                         allow_all_channels,
@@ -886,6 +1075,7 @@ async fn get_socket_mode_url(app_token: &str) -> Result<String> {
 #[allow(clippy::too_many_arguments)]
 async fn handle_message(
     event: &serde_json::Value,
+    team_id: &str,
     adapter: &Arc<SlackAdapter>,
     bot_token: &str,
     allow_all_channels: bool,
@@ -915,6 +1105,12 @@ async fn handle_message(
         None => return,
     };
     let thread_ts = event["thread_ts"].as_str().map(|s| s.to_string());
+
+    // Record recipient for native streaming (chat.startStream needs recipient_*).
+    // Thread root = existing thread_ts, else this message's ts (matches the
+    // ChannelRef.thread_id used when replying).
+    let thread_root = thread_ts.clone().unwrap_or_else(|| ts.clone());
+    adapter.note_trigger(&thread_root, &user_id, team_id).await;
 
     // Check allowed channels
     if !allow_all_channels && !allowed_channels.contains(&channel_id) {
@@ -1367,9 +1563,75 @@ fn markdown_to_mrkdwn(text: &str) -> String {
     text.into_owned()
 }
 
+fn build_start_stream_body(channel: &str, thread_ts: &str, user_id: &str, team_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "recipient_user_id": user_id,
+        "recipient_team_id": team_id,
+    })
+}
+
+fn build_append_stream_body(channel: &str, ts: &str, delta: &str) -> serde_json::Value {
+    serde_json::json!({
+        "channel": channel,
+        "ts": ts,
+        "chunks": [{ "type": "markdown_text", "text": delta }],
+    })
+}
+
+fn build_set_status_body(channel_id: &str, thread_ts: &str, status: &str) -> serde_json::Value {
+    serde_json::json!({
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+        "status": status,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- builder tests ---
+
+    #[test]
+    fn build_start_stream_body_has_recipient() {
+        let b = build_start_stream_body("C1", "1700.1", "U2", "T3");
+        assert_eq!(b["channel"], "C1");
+        assert_eq!(b["thread_ts"], "1700.1");
+        assert_eq!(b["recipient_user_id"], "U2");
+        assert_eq!(b["recipient_team_id"], "T3");
+    }
+
+    #[test]
+    fn build_append_stream_body_is_markdown_text_chunk() {
+        let b = build_append_stream_body("C1", "1700.9", "hello");
+        assert_eq!(b["channel"], "C1");
+        assert_eq!(b["ts"], "1700.9");
+        assert_eq!(b["chunks"][0]["type"], "markdown_text");
+        assert_eq!(b["chunks"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn build_set_status_body_shape() {
+        let b = build_set_status_body("C1", "1700.1", "Thinking\u{2026}");
+        assert_eq!(b["channel_id"], "C1");
+        assert_eq!(b["thread_ts"], "1700.1");
+        assert_eq!(b["status"], "Thinking\u{2026}");
+    }
+
+    #[tokio::test]
+    async fn degraded_stream_append_accumulates() {
+        let adapter = SlackAdapter::new("xoxb-test".into(), std::time::Duration::from_secs(60), AllowBots::Off, true);
+        adapter.streams.lock().await.insert(
+            "TS".into(),
+            StreamEntry { active: false, degraded_buf: String::new() },
+        );
+        assert_eq!(adapter.accumulate_degraded("TS", "a").await.as_deref(), Some("a"));
+        assert_eq!(adapter.accumulate_degraded("TS", "b").await.as_deref(), Some("ab"));
+        // missing stream is not resurrected:
+        assert_eq!(adapter.accumulate_degraded("MISSING", "x").await, None);
+    }
     use crate::adapter::ChatAdapter;
 
     /// Bot's own `<@UID>` trigger mention is stripped.
@@ -1665,11 +1927,23 @@ mod tests {
         assert!(!bot_id_matches_trusted(&trusted, "", None));
     }
 
+    #[tokio::test]
+    async fn note_trigger_then_lookup_returns_recipient() {
+        let ttl = std::time::Duration::from_secs(60);
+        let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Off, true);
+        adapter.note_trigger("1700.1", "U123", "T999").await;
+        assert_eq!(
+            adapter.lookup_recipient("1700.1").await,
+            Some(("U123".to_string(), "T999".to_string()))
+        );
+        assert_eq!(adapter.lookup_recipient("nope").await, None);
+    }
+
     /// Per-thread streaming: ON by default, OFF when another bot is present (#534).
     #[test]
     fn streaming_per_thread() {
         let ttl = std::time::Duration::from_secs(300);
-        let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Mentions);
+        let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Mentions, false);
 
         assert!(
             adapter.use_streaming(false),
@@ -1679,5 +1953,22 @@ mod tests {
             !adapter.use_streaming(true),
             "should NOT stream when other bot present"
         );
+    }
+
+    #[tokio::test]
+    async fn assistant_mode_gates_status_and_native_streaming() {
+        let ttl = std::time::Duration::from_secs(60);
+        // assistant_mode=true → status API on; native streaming on (no other bot),
+        // off when another bot is present; post+edit streaming on regardless.
+        let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Off, true);
+        assert!(adapter.uses_assistant_status(), "assistant_mode enables status API");
+        assert!(adapter.use_streaming(false), "post+edit streaming on when no other bot");
+        assert!(adapter.uses_native_streaming(false), "native streaming on when no other bot");
+        assert!(!adapter.uses_native_streaming(true), "other bot present disables native");
+        // assistant_mode=false → no status API, no native streaming; post+edit still streams.
+        let adapter2 = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Off, false);
+        assert!(!adapter2.uses_assistant_status());
+        assert!(adapter2.use_streaming(false), "post+edit streaming independent of assistant_mode");
+        assert!(!adapter2.uses_native_streaming(false), "native streaming requires assistant_mode");
     }
 }

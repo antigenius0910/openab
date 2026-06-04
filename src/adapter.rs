@@ -252,6 +252,47 @@ pub trait ChatAdapter: Send + Sync + 'static {
         self.edit_message(msg, "\u{200b}").await
     }
 
+    /// Whether this adapter streams via a native streaming API (Slack
+    /// chat.startStream) rather than the post+edit loop. Default: false.
+    /// `other_bot_present` lets adapters fall back to send-once in multi-bot
+    /// threads (mirrors `use_streaming`'s #534 rule).
+    fn uses_native_streaming(&self, _other_bot_present: bool) -> bool {
+        false
+    }
+
+    /// Begin a native stream. The returned MessageRef is the handle for
+    /// subsequent `stream_append` / `stream_finish`.
+    /// Default: delegate to send_message (only called when uses_native_streaming).
+    async fn stream_begin(&self, channel: &ChannelRef) -> Result<MessageRef> {
+        self.send_message(channel, "…").await
+    }
+
+    /// Append an INCREMENTAL delta to a native stream.
+    /// Default: best-effort edit (only called when uses_native_streaming).
+    async fn stream_append(&self, msg: &MessageRef, delta: &str) -> Result<()> {
+        self.edit_message(msg, delta).await
+    }
+
+    /// Finish a native stream and write the COMPLETE final content.
+    /// Default: delegate to edit_message.
+    async fn stream_finish(&self, msg: &MessageRef, final_content: &str) -> Result<()> {
+        self.edit_message(msg, final_content).await
+    }
+
+    /// Whether this adapter uses a status API (e.g. assistant.threads.setStatus)
+    /// instead of emoji reactions for thinking/tool indicators. Independent of
+    /// `uses_native_streaming` — status can work without content streaming.
+    /// Default: false.
+    fn uses_assistant_status(&self) -> bool {
+        false
+    }
+
+    /// Set an ephemeral status line (e.g. "Thinking…", "Using <tool>…").
+    /// Empty string clears it. Default: no-op (platforms without a status API).
+    async fn set_status(&self, _channel: &ChannelRef, _status: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Whether this adapter should use streaming edit (true) or send-once (false).
     /// `other_bot_present` indicates if another bot has posted in the current thread.
     /// Streaming should be disabled in multi-bot threads to avoid edit interference.
@@ -460,6 +501,8 @@ impl AdapterRouter {
         let thread_channel = thread_channel.clone();
         let message_limit = adapter.message_limit();
         let streaming = adapter.use_streaming(other_bot_present);
+        let native = adapter.uses_native_streaming(other_bot_present);
+        let assistant_status = adapter.uses_assistant_status();
         let table_mode = self.table_mode;
         let tool_display = self.reactions_config.tool_display;
         let prompt_hard_timeout = self.prompt_hard_timeout;
@@ -473,7 +516,11 @@ impl AdapterRouter {
                     conn.session_reset = false;
 
                     let (mut rx, request_id) = conn.session_prompt(content_blocks).await?;
-                    reactions.set_thinking().await;
+                    if assistant_status {
+                        let _ = adapter.set_status(&thread_channel, "Thinking…").await;
+                    } else {
+                        reactions.set_thinking().await;
+                    }
 
                     let mut text_buf = String::new();
                     let mut tool_lines: Vec<ToolEntry> = Vec::new();
@@ -482,8 +529,16 @@ impl AdapterRouter {
                         text_buf.push_str("⚠️ _Session expired, starting fresh..._\n\n");
                     }
 
+                    // Native streaming: defer stream_begin until first Text event
+                    // so the thinking phase only shows set_status (no placeholder msg).
+                    let mut native_msg: Option<MessageRef> = None;
+                    // Native delta coalescing state (used only when `native`).
+                    let mut native_pending = String::new();
+                    let mut native_last_flush = tokio::time::Instant::now();
+                    const NATIVE_FLUSH_MS: u128 = 400;
+
                     // Streaming edit: send placeholder, spawn edit loop
-                    let (buf_tx, placeholder_msg) = if streaming {
+                    let (buf_tx, placeholder_msg) = if streaming && !native {
                         let initial = if reset {
                             "⚠️ _Session expired, starting fresh..._\n\n…".to_string()
                         } else {
@@ -573,7 +628,30 @@ impl AdapterRouter {
                             match event {
                                 AcpEvent::Text(t) => {
                                     text_buf.push_str(&t);
-                                    if let Some(tx) = &buf_tx {
+                                    if native {
+                                        // Lazy stream_begin: open the stream on first text.
+                                        if native_msg.is_none() {
+                                            match adapter.stream_begin(&thread_channel).await {
+                                                Ok(m) => { native_msg = Some(m); }
+                                                Err(e) => {
+                                                    tracing::error!(error = ?e, "stream_begin failed on first text");
+                                                }
+                                            }
+                                        }
+                                        if let Some(msg) = &native_msg {
+                                            native_pending.push_str(&t);
+                                            if native_last_flush.elapsed().as_millis()
+                                                >= NATIVE_FLUSH_MS
+                                                && !native_pending.is_empty()
+                                            {
+                                                let _ = adapter
+                                                    .stream_append(msg, &native_pending)
+                                                    .await;
+                                                native_pending.clear();
+                                                native_last_flush = tokio::time::Instant::now();
+                                            }
+                                        }
+                                    } else if let Some(tx) = &buf_tx {
                                         let _ = tx.send(compose_display(
                                             &tool_lines,
                                             &text_buf,
@@ -583,56 +661,81 @@ impl AdapterRouter {
                                     }
                                 }
                                 AcpEvent::Thinking => {
-                                    reactions.set_thinking().await;
+                                    if assistant_status {
+                                        let _ = adapter
+                                            .set_status(&thread_channel, "Thinking…")
+                                            .await;
+                                    } else {
+                                        reactions.set_thinking().await;
+                                    }
                                 }
                                 AcpEvent::ToolStart { id, title } if !title.is_empty() => {
-                                    reactions.set_tool(&title).await;
-                                    let title = sanitize_title(&title);
-                                    if let Some(slot) = tool_lines.iter_mut().find(|e| e.id == id) {
-                                        slot.title = title;
-                                        slot.state = ToolState::Running;
+                                    if assistant_status {
+                                        let _ = adapter
+                                            .set_status(
+                                                &thread_channel,
+                                                &format!("Using {title}…"),
+                                            )
+                                            .await;
                                     } else {
-                                        tool_lines.push(ToolEntry {
-                                            id,
-                                            title,
-                                            state: ToolState::Running,
-                                        });
-                                    }
-                                    if let Some(tx) = &buf_tx {
-                                        let _ = tx.send(compose_display(
-                                            &tool_lines,
-                                            &text_buf,
-                                            true,
-                                            tool_display,
-                                        ));
+                                        reactions.set_tool(&title).await;
+                                        let title = sanitize_title(&title);
+                                        if let Some(slot) =
+                                            tool_lines.iter_mut().find(|e| e.id == id)
+                                        {
+                                            slot.title = title;
+                                            slot.state = ToolState::Running;
+                                        } else {
+                                            tool_lines.push(ToolEntry {
+                                                id,
+                                                title,
+                                                state: ToolState::Running,
+                                            });
+                                        }
+                                        if let Some(tx) = &buf_tx {
+                                            let _ = tx.send(compose_display(
+                                                &tool_lines,
+                                                &text_buf,
+                                                true,
+                                                tool_display,
+                                            ));
+                                        }
                                     }
                                 }
                                 AcpEvent::ToolDone { id, title, status } => {
-                                    reactions.set_thinking().await;
-                                    let new_state = if status == "completed" {
-                                        ToolState::Completed
+                                    if assistant_status {
+                                        let _ = adapter
+                                            .set_status(&thread_channel, "Thinking…")
+                                            .await;
                                     } else {
-                                        ToolState::Failed
-                                    };
-                                    if let Some(slot) = tool_lines.iter_mut().find(|e| e.id == id) {
-                                        if !title.is_empty() {
-                                            slot.title = sanitize_title(&title);
+                                        reactions.set_thinking().await;
+                                        let new_state = if status == "completed" {
+                                            ToolState::Completed
+                                        } else {
+                                            ToolState::Failed
+                                        };
+                                        if let Some(slot) =
+                                            tool_lines.iter_mut().find(|e| e.id == id)
+                                        {
+                                            if !title.is_empty() {
+                                                slot.title = sanitize_title(&title);
+                                            }
+                                            slot.state = new_state;
+                                        } else if !title.is_empty() {
+                                            tool_lines.push(ToolEntry {
+                                                id,
+                                                title: sanitize_title(&title),
+                                                state: new_state,
+                                            });
                                         }
-                                        slot.state = new_state;
-                                    } else if !title.is_empty() {
-                                        tool_lines.push(ToolEntry {
-                                            id,
-                                            title: sanitize_title(&title),
-                                            state: new_state,
-                                        });
-                                    }
-                                    if let Some(tx) = &buf_tx {
-                                        let _ = tx.send(compose_display(
-                                            &tool_lines,
-                                            &text_buf,
-                                            true,
-                                            tool_display,
-                                        ));
+                                        if let Some(tx) = &buf_tx {
+                                            let _ = tx.send(compose_display(
+                                                &tool_lines,
+                                                &text_buf,
+                                                true,
+                                                tool_display,
+                                            ));
+                                        }
                                     }
                                 }
                                 AcpEvent::ConfigUpdate { options } => {
@@ -670,7 +773,42 @@ impl AdapterRouter {
 
                     let final_content = markdown::convert_tables(&final_content, table_mode);
                     let chunks = format::split_message(&final_content, message_limit);
-                    if let Some(msg) = placeholder_msg {
+                    // Clear the assistant status line before delivering the final message.
+                    if assistant_status {
+                        let _ = adapter.set_status(&thread_channel, "").await;
+                    }
+                    if native {
+                        if let Some(msg) = &native_msg {
+                            if !native_pending.is_empty() {
+                                let _ = adapter.stream_append(msg, &native_pending).await;
+                            }
+                            // Finalize the streamed message with the first chunk (full-replace),
+                            // then post any overflow chunks as new in-thread messages — mirrors
+                            // the post+edit path so long replies aren't truncated at message_limit.
+                            // NOTE: the reply_to directive is intentionally NOT honored in native
+                            // streaming mode — the streamed message is the in-thread reply.
+                            match chunks.first() {
+                                Some(first) => {
+                                    let _ = adapter.stream_finish(msg, first).await;
+                                    for chunk in chunks.iter().skip(1) {
+                                        let _ = adapter.send_message(&thread_channel, chunk).await;
+                                    }
+                                }
+                                None => {
+                                    let _ = adapter.stream_finish(msg, &final_content).await;
+                                }
+                            }
+                        } else {
+                            // No Text event ever arrived (e.g. tool-only or empty
+                            // turn), so lazy stream_begin never fired and the stream
+                            // was never opened. Deliver the final content (which may
+                            // be the "_(no response)_" sentinel) as plain in-thread
+                            // messages so the turn is never silently dropped.
+                            for chunk in &chunks {
+                                let _ = adapter.send_message(&thread_channel, chunk).await;
+                            }
+                        }
+                    } else if let Some(msg) = placeholder_msg {
                         if let Some(ref reply_id) = directives.reply_to {
                             // reply_to directive: send reply first, then delete placeholder.
                             // Only delete if send succeeds — preserves placeholder on failure.

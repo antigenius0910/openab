@@ -312,6 +312,12 @@ pub struct SlackConfig {
     /// Batched mode only: soft token cap for greedy drain. Default: 24000.
     #[serde(default = "default_max_batch_tokens")]
     pub max_batch_tokens: usize,
+    /// Slack "AI app / Assistant" mode: stream replies via chat.startStream +
+    /// assistant.threads.setStatus instead of post+edit + emoji reactions.
+    /// Requires the Slack app to be an AI app (assistant feature enabled) with
+    /// the `assistant:write` scope. Default: false.
+    #[serde(default)]
+    pub assistant_mode: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -991,5 +997,20 @@ echo_transcript = false
         let cfg = parse_config(toml, "test").unwrap();
         assert!(cfg.stt.enabled);
         assert!(!cfg.stt.echo_transcript);
+    }
+
+    #[test]
+    fn slack_assistant_mode_defaults_false_and_parses_true() {
+        let cfg: SlackConfig = toml::from_str(
+            "bot_token = \"x\"\napp_token = \"y\"\n",
+        )
+        .unwrap();
+        assert!(!cfg.assistant_mode, "assistant_mode must default to false");
+
+        let cfg2: SlackConfig = toml::from_str(
+            "bot_token = \"x\"\napp_token = \"y\"\nassistant_mode = true\n",
+        )
+        .unwrap();
+        assert!(cfg2.assistant_mode);
     }
 }
