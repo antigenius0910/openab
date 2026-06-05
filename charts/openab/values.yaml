@@ -287,8 +287,9 @@ agents:
       existingSecret: ""
       # assistant_mode: native Slack streaming (chat.startStream) + assistant.threads.setStatus
       # status line instead of post+edit + emoji reactions. Requires the Slack app to be an
-      # AI app with the `assistant:write` scope (plus chat:write). Default: false.
-      assistantMode: false
+      # AI app with the `assistant:write` scope (plus chat:write). Default: true — set to
+      # false for non-AI Slack apps (without assistant:write) to keep emoji-reaction status.
+      assistantMode: true
       # allowAllChannels/allowAllUsers: same auto-infer logic as discord
       allowedChannels: []  # empty + no allowAllChannels → allow all (auto-inferred)
       allowedUsers: []     # empty + no allowAllUsers → allow all (auto-inferred)
