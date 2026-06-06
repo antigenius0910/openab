@@ -532,6 +532,9 @@ impl AdapterRouter {
                     // Native streaming: defer stream_begin until first Text event
                     // so the thinking phase only shows set_status (no placeholder msg).
                     let mut native_msg: Option<MessageRef> = None;
+                    // Once stream_begin fails, stop retrying for this turn to avoid
+                    // hammering the API on transient failures.
+                    let mut stream_begin_failed = false;
                     // Native delta coalescing state (used only when `native`).
                     let mut native_pending = String::new();
                     let mut native_last_flush = tokio::time::Instant::now();
@@ -630,11 +633,12 @@ impl AdapterRouter {
                                     text_buf.push_str(&t);
                                     if native {
                                         // Lazy stream_begin: open the stream on first text.
-                                        if native_msg.is_none() {
+                                        if native_msg.is_none() && !stream_begin_failed {
                                             match adapter.stream_begin(&thread_channel).await {
                                                 Ok(m) => { native_msg = Some(m); }
                                                 Err(e) => {
-                                                    tracing::error!(error = ?e, "stream_begin failed on first text");
+                                                    tracing::error!(error = ?e, "stream_begin failed on first text; will not retry this turn");
+                                                    stream_begin_failed = true;
                                                 }
                                             }
                                         }

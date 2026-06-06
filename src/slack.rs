@@ -155,7 +155,14 @@ impl SlackAdapter {
     async fn insert_stream(&self, ts: String, entry: StreamEntry) {
         let mut map = self.streams.lock().await;
         if map.len() >= STREAM_CACHE_MAX {
-            let evict: Vec<String> = map.keys().take(map.len() / 2).cloned().collect();
+            // Only evict inactive (degraded/stale) streams to avoid cutting off
+            // active streams mid-turn. If no inactive entries exist, fall through
+            // and allow the map to grow slightly beyond the soft cap.
+            let evict: Vec<String> = map
+                .iter()
+                .filter(|(_, e)| !e.active)
+                .map(|(k, _)| k.clone())
+                .collect();
             for k in evict {
                 map.remove(&k);
             }
