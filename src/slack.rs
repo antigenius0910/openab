@@ -1123,8 +1123,12 @@ async fn handle_message(
     // Record recipient for native streaming (chat.startStream needs recipient_*).
     // Thread root = existing thread_ts, else this message's ts (matches the
     // ChannelRef.thread_id used when replying).
+    // Only record when sender is a real user (U...) — bot IDs (B...) are rejected
+    // by chat.startStream's recipient_user_id parameter.
     let thread_root = thread_ts.clone().unwrap_or_else(|| ts.clone());
-    adapter.note_trigger(&thread_root, &user_id, team_id).await;
+    if !is_bot_msg {
+        adapter.note_trigger(&thread_root, &user_id, team_id).await;
+    }
 
     // Check allowed channels
     if !allow_all_channels && !allowed_channels.contains(&channel_id) {
