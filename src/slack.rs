@@ -620,15 +620,29 @@ impl ChatAdapter for SlackAdapter {
             map.get(ts).map(|e| e.active).unwrap_or(false)
         };
         if active {
-            let body = serde_json::json!({ "channel": msg.channel.channel_id, "ts": ts });
+            // Finalize content atomically via stopStream's markdown_text parameter
+            // instead of a separate chat.update — avoids a race window and extra API call.
+            let body = serde_json::json!({
+                "channel": msg.channel.channel_id,
+                "ts": ts,
+                "markdown_text": final_content,
+            });
             if let Err(e) = self.api_post("chat.stopStream", body).await {
-                error!(error = %e, "chat.stopStream failed");
+                error!(error = %e, "chat.stopStream failed; falling back to chat.update");
+                if let Err(e2) = self.edit_message(msg, final_content).await {
+                    warn!(error = %e2, "fallback chat.update also failed; trying postMessage");
+                    if let Err(e3) = self.send_message(&msg.channel, final_content).await {
+                        error!(error = %e3, "final postMessage also failed; reply may be incomplete");
+                    }
+                }
             }
-        }
-        if let Err(e) = self.edit_message(msg, final_content).await {
-            warn!(error = %e, "final chat.update failed; trying postMessage");
-            if let Err(e2) = self.send_message(&msg.channel, final_content).await {
-                error!(error = %e2, "final postMessage also failed; reply may be incomplete");
+        } else {
+            // Degraded path — already using post+edit, just do the final update.
+            if let Err(e) = self.edit_message(msg, final_content).await {
+                warn!(error = %e, "final chat.update failed; trying postMessage");
+                if let Err(e2) = self.send_message(&msg.channel, final_content).await {
+                    error!(error = %e2, "final postMessage also failed; reply may be incomplete");
+                }
             }
         }
         self.streams.lock().await.remove(ts);
@@ -1576,7 +1590,7 @@ fn build_append_stream_body(channel: &str, ts: &str, delta: &str) -> serde_json:
     serde_json::json!({
         "channel": channel,
         "ts": ts,
-        "chunks": [{ "type": "markdown_text", "text": delta }],
+        "markdown_text": delta,
     })
 }
 
@@ -1608,8 +1622,7 @@ mod tests {
         let b = build_append_stream_body("C1", "1700.9", "hello");
         assert_eq!(b["channel"], "C1");
         assert_eq!(b["ts"], "1700.9");
-        assert_eq!(b["chunks"][0]["type"], "markdown_text");
-        assert_eq!(b["chunks"][0]["text"], "hello");
+        assert_eq!(b["markdown_text"], "hello");
     }
 
     #[test]
