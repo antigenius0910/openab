@@ -823,11 +823,14 @@ impl AdapterRouter {
                                 }
                             }
                         } else {
-                            // No Text event ever arrived (e.g. tool-only or empty
-                            // turn), so lazy stream_begin never fired and the stream
-                            // was never opened. Deliver the final content (which may
-                            // be the "_(no response)_" sentinel) as plain in-thread
-                            // messages so the turn is never silently dropped.
+                            // native_msg is None — either no Text event ever arrived
+                            // (tool-only or empty turn) so lazy stream_begin never
+                            // fired, or stream_begin failed on the first Text event
+                            // and we stopped retrying for this turn. In both cases no
+                            // native stream was opened, so deliver the final content
+                            // (which may be the "_(no response)_" sentinel, or the
+                            // accumulated text_buf) as plain in-thread messages so
+                            // the turn is never silently dropped.
                             for chunk in &chunks {
                                 let _ = adapter.send_message(&thread_channel, chunk).await;
                             }
