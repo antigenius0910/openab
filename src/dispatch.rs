@@ -48,6 +48,13 @@ pub struct BufferedMessage {
     /// Snapshot at submit time. Captured per-message so a batch reflects the
     /// freshest known state; `dispatch_batch` reads `batch.last()`.
     pub other_bot_present: bool,
+    /// Slack streaming recipient `(user_id, team_id)` for `chat.startStream`,
+    /// captured at message-arrival time (after allow-list) and bound to this turn
+    /// — no shared thread cache, so no cross-turn race. Populated for real-user
+    /// Slack turns regardless of `assistant_mode`; only *consumed* when assistant
+    /// mode's native streaming is active. `None` for non-Slack platforms and
+    /// bot-authored turns.
+    pub recipient: Option<(String, String)>,
 }
 
 /// How `thread_key` is built for the dispatcher's per-thread map.
@@ -130,6 +137,7 @@ pub trait DispatchTarget: Send + Sync + 'static {
         thread_channel: &ChannelRef,
         reactions: Arc<StatusReactionController>,
         other_bot_present: bool,
+        recipient: Option<(String, String)>,
     ) -> Result<()>;
 }
 
@@ -151,6 +159,7 @@ impl DispatchTarget for AdapterRouter {
         thread_channel: &ChannelRef,
         reactions: Arc<StatusReactionController>,
         other_bot_present: bool,
+        recipient: Option<(String, String)>,
     ) -> Result<()> {
         AdapterRouter::stream_prompt_blocks(
             self,
@@ -160,6 +169,7 @@ impl DispatchTarget for AdapterRouter {
             thread_channel,
             reactions,
             other_bot_present,
+            recipient,
         )
         .await
     }
@@ -612,6 +622,10 @@ async fn dispatch_batch(
         .collect();
     let senders: Vec<String> = batch.iter().map(|m| m.sender_name.clone()).collect();
 
+    // Native-streaming recipient is bound to the turn (captured per-message). A
+    // batch attributes to the most recent sender; None for non-Slack/bot turns.
+    let recipient: Option<(String, String)> = batch.last().and_then(|m| m.recipient.clone());
+
     // Anchor reactions on the last message in the batch (before consuming).
     let trigger_msg = batch.last().unwrap().trigger_msg.clone();
 
@@ -653,6 +667,7 @@ async fn dispatch_batch(
             thread_channel,
             reactions.clone(),
             other_bot_present,
+            recipient,
         )
         .await;
 
@@ -1284,6 +1299,7 @@ mod tests {
             _thread_channel: &ChannelRef,
             _reactions: Arc<StatusReactionController>,
             other_bot_present: bool,
+            _recipient: Option<(String, String)>,
         ) -> Result<()> {
             self.calls.lock().unwrap().push(RecordedDispatch {
                 block_count: content_blocks.len(),
@@ -1361,6 +1377,7 @@ mod tests {
             arrived_at: Instant::now(),
             estimated_tokens: tokens,
             other_bot_present: false,
+            recipient: None,
         }
     }
 

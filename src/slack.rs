@@ -79,9 +79,6 @@ pub struct SlackAdapter {
     session_ttl: std::time::Duration,
     /// Assistant mode: stream via chat.startStream + assistant.threads.setStatus.
     assistant_mode: bool,
-    /// thread_ts → (recipient_user_id, recipient_team_id); chat.startStream
-    /// requires recipient_* for channel threads. Populated by handle_message.
-    trigger_recipients: tokio::sync::Mutex<HashMap<String, (String, String)>>,
     /// streaming message ts → state. active=false = degraded (post+edit fallback).
     /// Lifecycle: stream_begin inserts, stream_finish removes; insert_stream
     /// bounds the map (STREAM_CACHE_MAX) as a safety net against aborted turns.
@@ -105,7 +102,6 @@ impl SlackAdapter {
             multibot_threads: tokio::sync::Mutex::new(HashMap::new()),
             session_ttl,
             assistant_mode,
-            trigger_recipients: tokio::sync::Mutex::new(HashMap::new()),
             streams: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -126,28 +122,6 @@ impl SlackAdapter {
         enforce_cache_bounds(&mut cache, self.session_ttl);
     }
 
-    /// Record the recipient for a thread so stream_begin can supply
-    /// recipient_user_id/recipient_team_id to chat.startStream.
-    async fn note_trigger(&self, thread_ts: &str, user_id: &str, team_id: &str) {
-        if !self.assistant_mode {
-            return;
-        }
-        let mut map = self.trigger_recipients.lock().await;
-        map.insert(thread_ts.to_string(), (user_id.to_string(), team_id.to_string()));
-        if map.len() > PARTICIPATION_CACHE_MAX {
-            // Bound the map; eviction order is arbitrary, but a missed recipient is non-fatal
-            // (stream_begin falls back to degraded mode), so we keep this simple rather than
-            // mirroring enforce_cache_bounds' TTL/LRU.
-            let to_evict: Vec<String> = map.keys().take(map.len() / 2).cloned().collect();
-            for k in to_evict {
-                map.remove(&k);
-            }
-        }
-    }
-
-    async fn lookup_recipient(&self, thread_ts: &str) -> Option<(String, String)> {
-        self.trigger_recipients.lock().await.get(thread_ts).cloned()
-    }
 
     /// Insert a stream entry, bounding the map so aborted turns (begin without a
     /// matching finish) can't leak unboundedly. Normal lifecycle: stream_begin
@@ -557,9 +531,14 @@ impl ChatAdapter for SlackAdapter {
         native
     }
 
-    async fn stream_begin(&self, channel: &ChannelRef) -> Result<MessageRef> {
+    async fn stream_begin(
+        &self,
+        channel: &ChannelRef,
+        recipient: Option<(String, String)>,
+    ) -> Result<MessageRef> {
         let thread_ts = channel.thread_id.clone().unwrap_or_default();
-        let recipient = self.lookup_recipient(&thread_ts).await;
+        // recipient is bound to this turn (captured at message arrival, carried on
+        // BufferedMessage) — no shared thread cache, so no cross-turn race.
         let make_ref = |ts: String| MessageRef {
             channel: ChannelRef {
                 platform: "slack".into(),
@@ -590,7 +569,9 @@ impl ChatAdapter for SlackAdapter {
                 }
             }
         } else {
-            error!(thread_ts, "no recipient recorded for thread; falling back to post+edit");
+            // Expected for bot-authored turns (no recipient bound) and non-user
+            // triggers, so warn! rather than error! to avoid on-call noise.
+            warn!(thread_ts, "no recipient for turn; falling back to post+edit");
         }
 
         // Degraded fallback: plain placeholder via send_message; mark inactive.
@@ -1127,16 +1108,6 @@ async fn handle_message(
     };
     let thread_ts = event["thread_ts"].as_str().map(|s| s.to_string());
 
-    // Record recipient for native streaming (chat.startStream needs recipient_*).
-    // Thread root = existing thread_ts, else this message's ts (matches the
-    // ChannelRef.thread_id used when replying).
-    // Only record when sender is a real user (U...) — bot IDs (B...) are rejected
-    // by chat.startStream's recipient_user_id parameter.
-    let thread_root = thread_ts.clone().unwrap_or_else(|| ts.clone());
-    if !is_bot_msg {
-        adapter.note_trigger(&thread_root, &user_id, team_id).await;
-    }
-
     // Check allowed channels
     if !allow_all_channels && !allowed_channels.contains(&channel_id) {
         return;
@@ -1158,6 +1129,21 @@ async fn handle_message(
         let _ = adapter.add_reaction(&msg_ref, "🚫").await;
         return;
     }
+
+    // Capture the native-streaming recipient for THIS turn, now that the sender has
+    // passed the channel + user allow-list checks above (so denied/unauthorized
+    // senders are never recorded). It rides on the per-turn BufferedMessage to
+    // stream_begin — no shared thread cache, no cross-turn race. Real users only:
+    // bot IDs (B...) are rejected by chat.startStream's recipient_user_id, and an
+    // empty team_id would silently degrade, so we surface that.
+    let stream_recipient = if is_bot_msg {
+        None
+    } else {
+        if team_id.is_empty() {
+            warn!("empty team_id; chat.startStream will degrade to post+edit");
+        }
+        Some((user_id.clone(), team_id.to_string()))
+    };
 
     // Resolve mentions: strip only this bot's own trigger mention so the LLM
     // can still @-mention other users in its reply.
@@ -1440,6 +1426,7 @@ async fn handle_message(
         arrived_at: std::time::Instant::now(),
         estimated_tokens,
         other_bot_present,
+        recipient: stream_recipient,
     };
     if let Err(e) = dispatcher
         .submit(thread_key, thread_channel, adapter_dyn, buf_msg)
@@ -1949,18 +1936,6 @@ mod tests {
     fn trusted_bot_ids_rejects_empty_event_bot_id() {
         let trusted = HashSet::from(["".to_string()]);
         assert!(!bot_id_matches_trusted(&trusted, "", None));
-    }
-
-    #[tokio::test]
-    async fn note_trigger_then_lookup_returns_recipient() {
-        let ttl = std::time::Duration::from_secs(60);
-        let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Off, true);
-        adapter.note_trigger("1700.1", "U123", "T999").await;
-        assert_eq!(
-            adapter.lookup_recipient("1700.1").await,
-            Some(("U123".to_string(), "T999".to_string()))
-        );
-        assert_eq!(adapter.lookup_recipient("nope").await, None);
     }
 
     /// Per-thread streaming: ON by default, OFF when another bot is present (#534).

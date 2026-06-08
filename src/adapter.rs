@@ -263,7 +263,13 @@ pub trait ChatAdapter: Send + Sync + 'static {
     /// Begin a native stream. The returned MessageRef is the handle for
     /// subsequent `stream_append` / `stream_finish`.
     /// Default: delegate to send_message (only called when uses_native_streaming).
-    async fn stream_begin(&self, channel: &ChannelRef) -> Result<MessageRef> {
+    /// `recipient` is the per-turn `(user_id, team_id)` for platforms (Slack) that
+    /// need it for the native stream open; ignored by the default impl.
+    async fn stream_begin(
+        &self,
+        channel: &ChannelRef,
+        _recipient: Option<(String, String)>,
+    ) -> Result<MessageRef> {
         self.send_message(channel, "…").await
     }
 
@@ -418,6 +424,11 @@ impl AdapterRouter {
             return Err(e);
         }
 
+        // In assistant-status mode (e.g. Slack assistant_mode), status is conveyed
+        // via assistant.threads.setStatus, so the emoji-reaction lifecycle is skipped
+        // entirely — mirrors dispatch_batch so per-message and batched modes agree.
+        let assistant_status = adapter.uses_assistant_status();
+
         let reactions = Arc::new(StatusReactionController::new(
             self.reactions_config.enabled,
             adapter.clone(),
@@ -425,7 +436,9 @@ impl AdapterRouter {
             self.reactions_config.emojis.clone(),
             self.reactions_config.timing.clone(),
         ));
-        reactions.set_queued().await;
+        if !assistant_status {
+            reactions.set_queued().await;
+        }
 
         let result = self
             .stream_prompt(
@@ -438,22 +451,24 @@ impl AdapterRouter {
             )
             .await;
 
-        match &result {
-            Ok(()) => reactions.set_done().await,
-            Err(_) => reactions.set_error().await,
-        }
+        if !assistant_status {
+            match &result {
+                Ok(()) => reactions.set_done().await,
+                Err(_) => reactions.set_error().await,
+            }
 
-        let hold_ms = if result.is_ok() {
-            self.reactions_config.timing.done_hold_ms
-        } else {
-            self.reactions_config.timing.error_hold_ms
-        };
-        if self.reactions_config.remove_after_reply {
-            let reactions = reactions;
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
-                reactions.clear().await;
-            });
+            let hold_ms = if result.is_ok() {
+                self.reactions_config.timing.done_hold_ms
+            } else {
+                self.reactions_config.timing.error_hold_ms
+            };
+            if self.reactions_config.remove_after_reply {
+                let reactions = reactions;
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
+                    reactions.clear().await;
+                });
+            }
         }
 
         if let Err(ref e) = result {
@@ -481,6 +496,9 @@ impl AdapterRouter {
             thread_channel,
             reactions,
             other_bot_present,
+            // handle_message path (e.g. cron) is never Slack assistant-mode native
+            // streaming, so no per-turn recipient — degrades to post+edit if it were.
+            None,
         )
         .await
     }
@@ -488,6 +506,7 @@ impl AdapterRouter {
     /// Drive one ACP turn with the given pre-packed ContentBlocks.
     /// Called by both `handle_message` (per-message mode) and `dispatch::dispatch_batch`
     /// (batched mode).
+    #[allow(clippy::too_many_arguments)]
     pub async fn stream_prompt_blocks(
         &self,
         adapter: &Arc<dyn ChatAdapter>,
@@ -496,6 +515,7 @@ impl AdapterRouter {
         thread_channel: &ChannelRef,
         reactions: Arc<StatusReactionController>,
         other_bot_present: bool,
+        recipient: Option<(String, String)>,
     ) -> Result<()> {
         let adapter = adapter.clone();
         let thread_channel = thread_channel.clone();
@@ -634,7 +654,7 @@ impl AdapterRouter {
                                     if native {
                                         // Lazy stream_begin: open the stream on first text.
                                         if native_msg.is_none() && !stream_begin_failed {
-                                            match adapter.stream_begin(&thread_channel).await {
+                                            match adapter.stream_begin(&thread_channel, recipient.clone()).await {
                                                 Ok(m) => { native_msg = Some(m); }
                                                 Err(e) => {
                                                     tracing::error!(error = ?e, "stream_begin failed on first text; will not retry this turn");

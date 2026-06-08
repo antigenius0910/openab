@@ -887,6 +887,7 @@ impl EventHandler for Handler {
                 arrived_at: std::time::Instant::now(),
                 estimated_tokens,
                 other_bot_present: other_bot_present_flag,
+                recipient: None, // Slack-only (assistant mode); N/A for Discord
             };
             if let Err(e) = dispatcher
                 .submit(thread_key, thread_channel, adapter, buf_msg)
