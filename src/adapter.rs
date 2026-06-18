@@ -96,6 +96,53 @@ pub fn parse_output_directives(content: &str) -> (OutputDirectives, String) {
     (directives, remaining)
 }
 
+/// Select the answer text to deliver from the turn's accumulated agent-message
+/// buffer.
+///
+/// `full` is every `agent_message_chunk` concatenated across the turn, which
+/// includes the inter-tool narration the agent emits between tool calls ("let
+/// me pull the diff", "now reading the validator", ...). `answer_start` is the
+/// byte offset where the final answer block begins — set to the buffer length
+/// each time a tool call completes, so it ends up pointing just past the last
+/// tool.
+///
+/// When `keep_full` is false we deliver only that final block, dropping the
+/// narration so the message reads like the single composed artefact a
+/// tool-posted comment is. `keep_full` is true when the reply was streamed
+/// (the text was already shown live) or when `[reactions] narration_display` is
+/// set; in that case the whole buffer is returned unchanged.
+///
+/// `answer_start` is always a previous `full.len()`, hence a valid char
+/// boundary; the `get(..)` fallback to `full` only guards against a future
+/// caller passing a stale offset.
+pub fn select_delivery_text(full: &str, answer_start: usize, keep_full: bool) -> &str {
+    if keep_full {
+        full
+    } else {
+        full.get(answer_start..).unwrap_or(full)
+    }
+}
+
+/// Resolve the directives and body to deliver for a finished turn.
+///
+/// Output directives (e.g. `[[reply_to:...]]`) sit at the very start of the
+/// turn's output per `docs/output-directives.md`. When `keep_full` is false
+/// (send-once trimming) that start can be inter-tool narration that
+/// [`select_delivery_text`] discards — so we parse directives from the **full**
+/// buffer (preserving them) and then take the body from the delivered slice.
+/// The slice is re-parsed only to strip a directive header in the no-tool case,
+/// where the slice still equals `full` and therefore still carries the header.
+pub fn split_delivery(
+    full: &str,
+    answer_start: usize,
+    keep_full: bool,
+) -> (OutputDirectives, String) {
+    let (directives, _) = parse_output_directives(full);
+    let delivered = select_delivery_text(full, answer_start, keep_full);
+    let (_, body) = parse_output_directives(delivered);
+    (directives, body)
+}
+
 // --- Platform-agnostic types ---
 
 /// Identifies a channel or thread across platforms.
@@ -563,6 +610,13 @@ impl AdapterRouter {
         let thread_channel = thread_channel.clone();
         let message_limit = adapter.message_limit();
         let streaming = adapter.use_streaming(other_bot_present);
+        // Keep the full turn text (incl. inter-tool narration) when streaming
+        // (it was already shown live) OR when `[reactions] narration_display` is
+        // set. Otherwise a send-once turn delivers only the final answer block.
+        // Platform-agnostic — read from the shared reactions config, alongside
+        // `tool_display`. `streaming` still drives the placeholder / native-stream
+        // paths below; only the final-text selection uses `keep_full_text`.
+        let keep_full_text = streaming || self.reactions_config.narration_display;
         let native = adapter.uses_native_streaming(other_bot_present);
         let assistant_status = adapter.uses_assistant_status();
         // Platforms that render Markdown tables natively (e.g. Slack Block Kit
@@ -593,6 +647,12 @@ impl AdapterRouter {
 
                     let mut text_buf = String::new();
                     let mut tool_lines: Vec<ToolEntry> = Vec::new();
+                    // Byte offset into `text_buf` where the final answer block
+                    // begins — advanced to the buffer end on every tool
+                    // completion so it tracks "just past the last tool". Used by
+                    // send-once mode to drop inter-tool narration (see
+                    // `select_delivery_text`).
+                    let mut answer_start = 0usize;
 
                     if reset {
                         text_buf.push_str("⚠️ _Session expired, starting fresh..._\n\n");
@@ -791,6 +851,12 @@ impl AdapterRouter {
                                     }
                                 }
                                 AcpEvent::ToolDone { id, title, status } => {
+                                    // The final answer block is whatever text the agent
+                                    // emits AFTER its last tool. Advancing this on every
+                                    // completion leaves it pointing just past the last
+                                    // tool; send-once delivery slices from here so the
+                                    // preceding inter-tool narration is dropped.
+                                    answer_start = text_buf.len();
                                     // Live indicator: assistant status line vs emoji reaction.
                                     if assistant_status {
                                         let _ = adapter
@@ -841,11 +907,25 @@ impl AdapterRouter {
                     // Stop the edit loop
                     drop(buf_tx);
 
-                    // Parse output directives from raw text_buf BEFORE compose_display.
-                    // Directives are agent meta-layer, not content — must be stripped
-                    // before tool lines are composed into the display output.
-                    let (directives, stripped_text) = parse_output_directives(&text_buf);
-                    let text_buf = stripped_text;
+                    // In send-once mode, deliver only the final answer block —
+                    // the text after the last tool call — so inter-tool narration
+                    // ("let me pull the diff", "now reading X") never reaches the
+                    // message. Streaming modes already showed that text live, so
+                    // they keep the whole buffer. Directives are parsed from the
+                    // FULL buffer (they sit at output start, which the slice may
+                    // drop) so a leading [[reply_to:...]] survives the narration
+                    // it was emitted alongside.
+                    let (directives, text_buf) =
+                        split_delivery(&text_buf, answer_start, keep_full_text);
+                    // The session-reset notice lives at the head of the buffer; a
+                    // tool advancing answer_start past it would drop it from the
+                    // slice, so re-prepend it to the (directive-stripped) body in
+                    // exactly that case (answer_start == 0 keeps it via the slice).
+                    let text_buf = if reset && !keep_full_text && answer_start > 0 {
+                        format!("⚠️ _Session expired, starting fresh..._\n\n{text_buf}")
+                    } else {
+                        text_buf
+                    };
 
                     // Build final content
                     let final_content =
@@ -1164,6 +1244,75 @@ fn compose_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_delivery_text_send_once_keeps_only_final_block() {
+        // Simulates: narration "n1" → tool (answer_start→2) → narration "n2"
+        // → tool (answer_start→14) → final answer. In send-once mode only the
+        // text after the last tool survives.
+        let full = "n1[tool]n2[tool]the final answer";
+        let answer_start = "n1[tool]n2[tool]".len();
+        assert_eq!(
+            select_delivery_text(full, answer_start, false),
+            "the final answer"
+        );
+    }
+
+    #[test]
+    fn select_delivery_text_streaming_keeps_full_buffer() {
+        // Streaming already showed the text live, so the whole buffer is kept
+        // regardless of answer_start.
+        let full = "narration then answer";
+        assert_eq!(select_delivery_text(full, 10, true), full);
+    }
+
+    #[test]
+    fn select_delivery_text_send_once_no_tools_keeps_everything() {
+        // No tool ever completed → answer_start stays 0 → the whole (tool-free)
+        // reply is delivered, including a leading session-reset notice.
+        let full = "⚠️ _Session expired, starting fresh..._\n\njust the answer";
+        assert_eq!(select_delivery_text(full, 0, false), full);
+    }
+
+    #[test]
+    fn select_delivery_text_stale_offset_falls_back_to_full() {
+        // A byte offset past the end (or a non-char-boundary) must not panic —
+        // get(..) returns None and we fall back to the full buffer.
+        let full = "abc";
+        assert_eq!(select_delivery_text(full, 999, false), full);
+        // 1 is a non-boundary inside the multi-byte '✓' (3 bytes); fallback.
+        assert_eq!(select_delivery_text("✓x", 1, false), "✓x");
+    }
+
+    #[test]
+    fn split_delivery_send_once_preserves_leading_directive_across_tools() {
+        // Regression: a [[reply_to:...]] emitted at output start, followed by
+        // narration + a tool, must survive even though the narration is dropped.
+        let full = "[[reply_to:101]]\nlet me check...[tool]the final answer";
+        let answer_start = "[[reply_to:101]]\nlet me check...[tool]".len();
+        let (directives, body) = split_delivery(full, answer_start, false);
+        assert_eq!(directives.reply_to.as_deref(), Some("101"));
+        assert_eq!(body, "the final answer");
+    }
+
+    #[test]
+    fn split_delivery_send_once_no_tools_strips_directive_from_body() {
+        // No tool ran (answer_start == 0): the slice still carries the header,
+        // so the body must have it stripped while directives are still parsed.
+        let full = "[[reply_to:55]]\njust the answer";
+        let (directives, body) = split_delivery(full, 0, false);
+        assert_eq!(directives.reply_to.as_deref(), Some("55"));
+        assert_eq!(body, "just the answer");
+    }
+
+    #[test]
+    fn split_delivery_streaming_keeps_full_body_and_directive() {
+        // Streaming keeps the full buffer; directive parsed and stripped once.
+        let full = "[[reply_to:7]]\nnarration then answer";
+        let (directives, body) = split_delivery(full, 5, true);
+        assert_eq!(directives.reply_to.as_deref(), Some("7"));
+        assert_eq!(body, "narration then answer");
+    }
 
     /// Compile-time regression guard: use_streaming() is a required trait method
     /// (no default). Any adapter that forgets to implement it will fail to compile.
