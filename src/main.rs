@@ -1,5 +1,6 @@
 mod acp;
 mod adapter;
+mod allow_list;
 mod bot_turns;
 mod config;
 mod cron;
@@ -382,6 +383,10 @@ async fn main() -> anyhow::Result<()> {
         ));
         dispatchers.lock().unwrap().push(slack_dispatcher.clone());
         let slack_ctl_registry = ctl_registry.clone();
+        let slack_allow_list: Arc<dyn allow_list::AllowListSource> =
+            Arc::new(allow_list::StaticAllowList::new(
+                slack_cfg.allowed_users.into_iter().collect(),
+            ));
         Some(tokio::spawn(async move {
             if let Err(e) = slack::run_slack_adapter(
                 adapter,
@@ -389,7 +394,7 @@ async fn main() -> anyhow::Result<()> {
                 allow_all_channels,
                 allow_all_users,
                 slack_cfg.allowed_channels.into_iter().collect(),
-                slack_cfg.allowed_users.into_iter().collect(),
+                slack_allow_list,
                 slack_cfg.allow_bot_messages,
                 slack_cfg.trusted_bot_ids.into_iter().collect(),
                 slack_cfg.allow_user_messages,

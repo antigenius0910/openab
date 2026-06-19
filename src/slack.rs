@@ -1,5 +1,6 @@
 use crate::acp::ContentBlock;
 use crate::adapter::{ChannelRef, ChatAdapter, MessageRef, SenderContext};
+use crate::allow_list::AllowListSource;
 use crate::bot_turns::{BotTurnTracker, TurnAction, TurnSeverity};
 use crate::config::{AllowBots, AllowUsers, SttConfig};
 use crate::media;
@@ -712,7 +713,7 @@ pub async fn run_slack_adapter(
     allow_all_channels: bool,
     allow_all_users: bool,
     allowed_channels: HashSet<String>,
-    allowed_users: HashSet<String>,
+    allowed_users: Arc<dyn AllowListSource>,
     allow_bot_messages: AllowBots,
     trusted_bot_ids: HashSet<String>,
     allow_user_messages: AllowUsers,
@@ -827,7 +828,7 @@ pub async fn run_slack_adapter(
                                                 let adapter = adapter.clone();
                                                 let bot_token = bot_token.clone();
                                                 let allowed_channels = allowed_channels.clone();
-                                                let allowed_users = allowed_users.clone();
+                                                let allowed_users = allowed_users.allowed_users();
                                                 let stt_config = stt_config.clone();
                                                 let dispatcher = dispatcher.clone();
                                                 let ctl_registry = ctl_registry.clone();
@@ -1080,7 +1081,7 @@ pub async fn run_slack_adapter(
                                                 let adapter = adapter.clone();
                                                 let bot_token = bot_token.clone();
                                                 let allowed_channels = allowed_channels.clone();
-                                                let allowed_users = allowed_users.clone();
+                                                let allowed_users = allowed_users.allowed_users();
                                                 let stt_config = stt_config.clone();
                                                 let dispatcher = dispatcher.clone();
                                                 let ctl_registry = ctl_registry.clone();
