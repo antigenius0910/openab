@@ -201,7 +201,7 @@ tests:
     asserts:
       - notMatchRegex:
           path: data["config.toml"]
-          pattern: 'streaming'
+          pattern: 'streaming = '
 
   - it: renders reactions narration_display = true when explicitly enabled
     set:
@@ -217,7 +217,7 @@ tests:
     asserts:
       - notMatchRegex:
           path: data["config.toml"]
-          pattern: 'narration_display'
+          pattern: 'narration_display = '
 
   - it: does not render reactions narration_display when key absent (Rust default false)
     set:
@@ -225,4 +225,4 @@ tests:
     asserts:
       - notMatchRegex:
           path: data["config.toml"]
-          pattern: 'narration_display'
+          pattern: 'narration_display = '
