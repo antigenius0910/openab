@@ -13,7 +13,7 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # trusted_bot_ids = []         # empty = any bot (mode permitting); set to restrict
 # allowed_role_ids = []        # role IDs that trigger the bot (same as direct @mention)
                                # note: if multiple bots share the same role, all will respond simultaneously
-# allow_user_messages = "multibot-mentions"  # "multibot-mentions" (default) | "involved" | "mentions"
+# allow_user_messages = "involved"  # "involved" (default) | "mentions"
                                      # "involved" = reply in threads bot owns or has participated in
                                      # "mentions" = always require @mention
 # allow_dm = false                     # true = respond to Discord DMs; false (default) = ignore DMs
@@ -28,7 +28,7 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # allowed_users = ["U0123456789"]      # only checked when allow_all_users = false
 # allow_bot_messages = "off"           # "off" (default) | "mentions" | "all"
 # trusted_bot_ids = []                 # empty = any bot (mode permitting); set to restrict
-# allow_user_messages = "multibot-mentions"     # "multibot-mentions" (default) | "involved" | "mentions"
+# allow_user_messages = "involved"     # "involved" (default) | "mentions" | "multibot-mentions"
                                         # "involved" = reply in threads bot has participated in
                                         # "mentions" = always require @mention
                                         # "multibot-mentions" = like "involved", but require @mention
@@ -42,17 +42,12 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # streaming = true                     # default true: stream the reply live (native or post+edit).
 #                                       # Set false to always post a single final message (send-once),
 #                                       # regardless of assistant_mode — useful in multi-agent threads
-#                                       # to avoid streamed-edit states re-firing app_mention. Mirrors
-#                                       # [gateway] streaming (which defaults false). What a send-once
-#                                       # message *contains* is controlled by [reactions] narration_display.
+#                                       # to avoid streamed-edit states re-firing app_mention.
+#                                       # What a send-once message *contains* is controlled by [reactions] narration_display.
 
 # [gateway]
 # url = "ws://openab-gateway:8080/ws"  # WebSocket URL of the custom gateway
 # platform = "line"                     # "telegram" (default) | "line" | "googlechat"
-# streaming = false                     # default false → send-once: gateway platforms post a single
-#                                       # final message, and (like all send-once) deliver only the
-#                                       # final answer block — inter-tool narration is dropped. Set
-#                                       # true to stream live + keep full text (needs msg-editing support).
 # token = "${GATEWAY_TOKEN}"            # shared token for WebSocket auth (optional but recommended)
 # bot_username = "my_bot"               # for @mention gating in groups
 # allow_all_channels = true             # true = allow all channels; false = only allowed_channels
@@ -61,8 +56,6 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # allow_all_users = true                # true = any user; false = only allowed_users
 #                                       # omitted = auto-detect from list (non-empty → false, empty → true)
 # allowed_users = ["U5678"]             # only checked when allow_all_users = false
-# streaming = true                      # enable streaming (typewriter) mode
-# streaming_placeholder = false         # set false for draft-based platforms (e.g. Telegram Rich Messages)
 
 # --- AgentCore Runtime (alternative to [agent]) ---
 # When [agentcore] is set and [agent].command is not explicitly provided,
@@ -123,15 +116,6 @@ working_dir = "/home/agent"
 # # session/request_permission — all tools run without user confirmation,
 # # equivalent to --trust-all-tools on other backends.
 # # Run `opencode auth login` once before starting openab.
-
-# [agent]
-# command = "mimo"
-# args = ["acp"]
-# working_dir = "/home/node"
-# # MiMo-Code (Xiaomi fork of OpenCode) with persistent memory, subagents,
-# # and MiMo Auto (free channel). Same ACP protocol as OpenCode.
-# # Install: npm install -g @mimo-ai/cli
-# # Auth: kubectl exec -it <pod> -- mimo auth login
 
 # [agent]
 # command = "cursor-agent"
