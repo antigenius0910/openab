@@ -119,7 +119,14 @@ pub fn select_delivery_text(full: &str, answer_start: usize, keep_full: bool) ->
     if keep_full {
         full
     } else {
-        full.get(answer_start..).unwrap_or(full)
+        full.get(answer_start..).unwrap_or_else(|| {
+            tracing::warn!(
+                answer_start,
+                full_len = full.len(),
+                "stale answer_start offset; delivering full buffer"
+            );
+            full
+        })
     }
 }
 
@@ -130,8 +137,15 @@ pub fn select_delivery_text(full: &str, answer_start: usize, keep_full: bool) ->
 /// (send-once trimming) that start can be inter-tool narration that
 /// [`select_delivery_text`] discards — so we parse directives from the **full**
 /// buffer (preserving them) and then take the body from the delivered slice.
-/// The slice is re-parsed only to strip a directive header in the no-tool case,
-/// where the slice still equals `full` and therefore still carries the header.
+///
+/// The delivered slice is re-parsed to strip the directive header only when it
+/// still starts at byte 0 (`answer_start == 0` or `keep_full`). When
+/// `answer_start > 0` the slice is mid-buffer text; any `[[…]]` there is reply
+/// content, not a directive header, and must not be stripped.
+///
+/// Note: directive preservation assumes the turn buffer starts with the
+/// directive. A session-reset turn seeds the buffer with the expiry notice
+/// first, so directives are not preserved in that case (pre-existing behaviour).
 pub fn split_delivery(
     full: &str,
     answer_start: usize,
@@ -139,7 +153,14 @@ pub fn split_delivery(
 ) -> (OutputDirectives, String) {
     let (directives, _) = parse_output_directives(full);
     let delivered = select_delivery_text(full, answer_start, keep_full);
-    let (_, body) = parse_output_directives(delivered);
+    // Strip the directive header from the body only when the delivered slice
+    // begins at byte 0 (no tools ran, or keep_full). When answer_start > 0,
+    // delivered is the post-last-tool suffix — don't re-parse it.
+    let body = if answer_start == 0 || keep_full {
+        parse_output_directives(delivered).1
+    } else {
+        delivered.to_owned()
+    };
     (directives, body)
 }
 
@@ -371,13 +392,6 @@ pub trait ChatAdapter: Send + Sync + 'static {
     /// not be detected until the next message. This is acceptable: the first
     /// response may stream, but subsequent ones will correctly use send-once.
     fn use_streaming(&self, other_bot_present: bool) -> bool;
-
-    /// Whether to send the "…" placeholder message before streaming starts.
-    /// Default: true. Platforms using drafts (e.g. Telegram Rich Messages) can
-    /// return false to suppress the placeholder.
-    fn show_streaming_placeholder(&self) -> bool {
-        true
-    }
 }
 
 // --- AdapterRouter ---
@@ -676,15 +690,7 @@ impl AdapterRouter {
                         } else {
                             "…".to_string()
                         };
-                        let msg = if adapter.show_streaming_placeholder() {
-                            adapter.send_message(&thread_channel, &initial).await?
-                        } else {
-                            // Dummy ref for edit loop — gateway uses drafts, doesn't need real msg_id
-                            MessageRef {
-                                message_id: "draft".to_string(),
-                                channel: thread_channel.clone(),
-                            }
-                        };
+                        let msg = adapter.send_message(&thread_channel, &initial).await?;
                         let (tx, rx) = tokio::sync::watch::channel(initial);
                         let edit_adapter = adapter.clone();
                         let edit_msg = msg.clone();
@@ -1030,20 +1036,12 @@ impl AdapterRouter {
                                 let _ = adapter.delete_message(&msg).await;
                             }
                         } else {
-                            // Normal streaming: edit first chunk into placeholder, send rest.
-                            // If placeholder is a dummy "draft" ref (no real message), send as
-                            // new message instead — the gateway will persist via sendRichMessage.
-                            if msg.message_id == "draft" {
-                                for chunk in &chunks {
-                                    let _ = adapter.send_message(&thread_channel, chunk).await;
-                                }
-                            } else {
-                                if let Some(first) = chunks.first() {
-                                    let _ = adapter.edit_message(&msg, first).await;
-                                }
-                                for chunk in chunks.iter().skip(1) {
-                                    let _ = adapter.send_message(&thread_channel, chunk).await;
-                                }
+                            // Normal streaming: edit first chunk into placeholder, send rest
+                            if let Some(first) = chunks.first() {
+                                let _ = adapter.edit_message(&msg, first).await;
+                            }
+                            for chunk in chunks.iter().skip(1) {
+                                let _ = adapter.send_message(&thread_channel, chunk).await;
                             }
                         }
                     } else {
