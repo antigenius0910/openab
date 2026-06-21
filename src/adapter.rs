@@ -164,6 +164,33 @@ pub fn split_delivery(
     (directives, body)
 }
 
+/// Apply the session-reset re-prepend rule to a finalized turn body.
+///
+/// The session-reset notice (`"⚠️ _Session expired, starting fresh..._\n\n"`)
+/// is pushed at the head of the turn buffer so streaming consumers see it
+/// live. When the turn ends in send-once trimming mode (`!keep_full_text`) and
+/// a tool ran (`answer_start > 0`), the slice that `select_delivery_text`
+/// returns starts *after* the notice — so re-prepend it to keep the user
+/// aware their session was reset. In every other corner (no reset, or
+/// `keep_full_text`, or no tools ran) the notice is either absent or already
+/// included in `body`, and we must not duplicate it.
+///
+/// Pure helper: deliberately mirrors the inline branch at the end of
+/// `AdapterRouter::stream_prompt_blocks` so the four-corner truth table can be
+/// exercised in isolation without a live ACP session.
+pub fn finalize_body(
+    reset: bool,
+    keep_full_text: bool,
+    answer_start: usize,
+    body: String,
+) -> String {
+    if reset && !keep_full_text && answer_start > 0 {
+        format!("⚠️ _Session expired, starting fresh..._\n\n{body}")
+    } else {
+        body
+    }
+}
+
 // --- Platform-agnostic types ---
 
 /// Identifies a channel or thread across platforms.
@@ -1001,12 +1028,9 @@ impl AdapterRouter {
                     // The session-reset notice lives at the head of the buffer; a
                     // tool advancing answer_start past it would drop it from the
                     // slice, so re-prepend it to the (directive-stripped) body in
-                    // exactly that case (answer_start == 0 keeps it via the slice).
-                    let text_buf = if reset && !keep_full_text && answer_start > 0 {
-                        format!("⚠️ _Session expired, starting fresh..._\n\n{text_buf}")
-                    } else {
-                        text_buf
-                    };
+                    // exactly that case. `finalize_body` is the pure helper that
+                    // encodes the four-corner truth table so it can be unit-tested.
+                    let text_buf = finalize_body(reset, keep_full_text, answer_start, text_buf);
 
                     // Build final content
                     let final_content =
@@ -1603,6 +1627,69 @@ mod tests {
         let (directives, body) = split_delivery(full, 5, true);
         assert_eq!(directives.reply_to.as_deref(), Some("7"));
         assert_eq!(body, "narration then answer");
+    }
+
+    // --- finalize_body: four-corner truth table for the reset re-prepend ---
+    //
+    // The send-once trimming logic in `stream_prompt_blocks` ends with an
+    // inline branch that decides whether to re-prepend the session-reset
+    // notice. Extracted into the pure helper `finalize_body` so each corner
+    // of (reset, keep_full_text, answer_start) can be exercised without a live
+    // ACP session. Mirrors the integration-level concern raised in PR #1115
+    // peer review (howie group-review, "Important #3").
+
+    #[test]
+    fn finalize_body_reset_send_once_with_tools_prepends_notice() {
+        // Reset turn, send-once trimming, a tool advanced answer_start past
+        // the notice → the slice no longer contains it → re-prepend.
+        let body = "the final answer".to_string();
+        let out = finalize_body(true, false, 42, body);
+        assert_eq!(
+            out, "⚠️ _Session expired, starting fresh..._\n\nthe final answer",
+            "send-once + reset + tool ran → notice must be re-prepended"
+        );
+    }
+
+    #[test]
+    fn finalize_body_reset_send_once_no_tools_passes_through() {
+        // answer_start == 0 means the slice still equals the full buffer,
+        // which already starts with the notice → re-prepending would
+        // duplicate it.
+        let body = "⚠️ _Session expired, starting fresh..._\n\nthe final answer".to_string();
+        let out = finalize_body(true, false, 0, body.clone());
+        assert_eq!(
+            out, body,
+            "send-once + reset + no tools → body already carries notice, pass through"
+        );
+    }
+
+    #[test]
+    fn finalize_body_reset_keep_full_passes_through() {
+        // keep_full_text means the slice is the whole buffer (incl. the
+        // notice) → must not duplicate, regardless of answer_start.
+        let body = "⚠️ _Session expired, starting fresh..._\n\nnarration then answer".to_string();
+        let out = finalize_body(true, true, 42, body.clone());
+        assert_eq!(
+            out, body,
+            "keep_full_text → body already carries notice, pass through even with tools"
+        );
+    }
+
+    #[test]
+    fn finalize_body_no_reset_passes_through() {
+        // Non-reset turn: there is no notice to manage, irrespective of the
+        // other two flags. Covers both halves of the cartesian product.
+        let body = "the final answer".to_string();
+        assert_eq!(
+            finalize_body(false, false, 42, body.clone()),
+            body,
+            "no reset → never prepend (send-once + tools)"
+        );
+        assert_eq!(
+            finalize_body(false, true, 0, body.clone()),
+            body,
+            "no reset → never prepend (keep_full + no tools)"
+        );
     }
 
     /// Compile-time regression guard: use_streaming() is a required trait method
