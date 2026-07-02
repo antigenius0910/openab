@@ -92,6 +92,9 @@ agents:
     #   # The content is mounted verbatim — no field mapping, no validation. Secrets must still be
     #   # injected via secretEnv (they render as env vars and are referenced as ${VAR} in the TOML).
     #   # When set, all adapter fields (slack.*, discord.*, pool.*, etc.) are ignored for rendering.
+    #   # Can be set inline (below) or loaded as-is from a standalone file (WYSIWYG editing, full
+    #   # TOML syntax highlighting/schema validation in your editor) via:
+    #   #   helm upgrade ... --set-file agents.<name>.configToml=./config.toml
     #   # Example:
     #   # configToml: |
     #   #   [slack]

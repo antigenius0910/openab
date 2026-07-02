@@ -87,7 +87,9 @@ Agents deployed:
 {{- range $legacyAgents }}
       • {{ . }}
 {{- end }}
-    This rendering path will be removed in v0.10.0.
-    Migrate to configToml to write config.toml directly in your values file.
+    This rendering path is deprecated and will be removed in a future release.
+    Track the removal timeline: https://github.com/openabdev/openab/issues/1278
+    Migrate to configToml (or configUrl for a platform-agnostic setup) to write
+    config.toml directly instead of relying on Helm's rendering.
     See: https://github.com/openabdev/openab/blob/main/docs/migrate-to-configtoml.md
 {{- end }}
