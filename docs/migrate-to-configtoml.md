@@ -7,7 +7,7 @@ issue for its removal timeline: https://github.com/openabdev/openab/issues/1278
 
 For the platform-agnostic option (works identically on Kubernetes, ECS,
 Zeabur, and AgentCore Runtime — no chart required), see `configUrl` instead:
-`docs/adr/configurl-over-helm-rendering.md`. `configToml` is the
+[`docs/adr/configurl-over-helm-rendering.md`](adr/configurl-over-helm-rendering.md). `configToml` is the
 Kubernetes/Helm-only convenience for users not yet on external config storage.
 
 ## Why

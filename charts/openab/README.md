@@ -108,8 +108,8 @@ helm upgrade openab openab/openab \
   --set-file agents.kiro.configToml=./config.toml
 ```
 
-See `docs/migrate-to-configtoml.md` for a full before/after guide, and
-`docs/adr/configurl-over-helm-rendering.md` for when to prefer `configUrl` instead
+See [`docs/migrate-to-configtoml.md`](../../docs/migrate-to-configtoml.md) for a full before/after guide, and
+[`docs/adr/configurl-over-helm-rendering.md`](../../docs/adr/configurl-over-helm-rendering.md) for when to prefer `configUrl` instead
 (platform-agnostic — works identically on Kubernetes, ECS, Zeabur, and AgentCore).
 
 ### Discord ID precision warning
