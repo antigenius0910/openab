@@ -43,6 +43,64 @@ containerSecurityContext:
     drop:
       - ALL
 
+# NetworkPolicy for pod-level network isolation. Opt-in and backwards-compatible:
+# no NetworkPolicy resource is rendered unless networkPolicy.enabled=true.
+# See RFC: https://github.com/openabdev/openab/issues/1394
+networkPolicy:
+  enabled: false
+
+  # Ingress rules. Default = deny-all ingress to agent pods (they only
+  # initiate outbound Socket Mode / websocket connections). Gateway pod
+  # gets a separate policy allowing port 8080 when gateway.enabled=true.
+  ingress:
+    # extraRules: raw NetworkPolicyIngressRule entries appended verbatim.
+    # Use for cluster-specific allow-lists (e.g. Prometheus scrape, mesh sidecars).
+    extraRules: []
+
+  egress:
+    # Egress topology. "direct" (default) allows egress to the open internet
+    # (typically DNS + HTTPS). "proxy" restricts egress to a designated proxy
+    # Service — recommended for enterprise / multi-tenant / compliance-driven
+    # deployments (see OpenSHELL prior art).
+    mode: direct
+
+    # Allow DNS to kube-dns (UDP+TCP 53). Almost always required in both modes.
+    # Targets pods labelled k8s-app=kube-dns in any namespace (kubeadm / CoreDNS default).
+    # For non-standard DNS setups, disable this and add an appropriate egress.extraRules entry.
+    allowDns: true
+
+    # ── mode: direct ────────────────────────────────────────────────────────
+    # Allow HTTPS (TCP 443) to 0.0.0.0/0 EXCEPT the cloud metadata service
+    # (169.254.169.254/32) — blocks a common IAM-credential-theft path from
+    # a compromised agent pod. Ignored when mode=proxy.
+    allowHttps: true
+    # Allow HTTP (TCP 80) with the same metadata exclusion. Off by default;
+    # enable if hooks / STT fetch over HTTP. Ignored when mode=proxy.
+    allowHttp: false
+
+    # ── mode: proxy ─────────────────────────────────────────────────────────
+    # When mode=proxy, egress is restricted to this Service selector.
+    # The chart does NOT ship the proxy — deploy it separately (OpenSHELL,
+    # Squid, Envoy, mitmproxy, or anything speaking HTTP CONNECT).
+    # egress.allowDns above still applies. allowHttps/allowHttp are IGNORED.
+    # Example:
+    #   proxy:
+    #     namespace: "egress-proxy"
+    #     podSelector:
+    #       matchLabels:
+    #         app: openshell
+    #     ports:
+    #       - protocol: TCP
+    #         port: 3128
+    proxy:
+      namespace: ""
+      podSelector: {}
+      ports: []
+
+    # extraRules: raw NetworkPolicyEgressRule entries appended verbatim.
+    # Use to open extra ports or add cluster-specific carve-outs.
+    extraRules: []
+
 agents:
   kiro:
     enabled: true    # set to false to skip creating resources for this agent

@@ -1,0 +1,241 @@
+suite: NetworkPolicy support (opt-in, direct + proxy egress modes)
+templates:
+  - templates/networkpolicy.yaml
+
+tests:
+  - it: renders no NetworkPolicy resource when networkPolicy.enabled is false (default)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a single agent NetworkPolicy in direct mode (gateway off) with deny-all ingress and DNS + HTTPS egress
+    set:
+      networkPolicy.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: NetworkPolicy
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-openab-kiro
+      - equal:
+          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
+          value: kiro
+      - equal:
+          path: spec.policyTypes
+          value: [Ingress, Egress]
+      - equal:
+          path: spec.ingress
+          value: []
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - namespaceSelector: {}
+                podSelector:
+                  matchLabels:
+                    k8s-app: kube-dns
+            ports:
+              - protocol: UDP
+                port: 53
+              - protocol: TCP
+                port: 53
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock:
+                  cidr: 0.0.0.0/0
+                  except:
+                    - 169.254.169.254/32
+            ports:
+              - protocol: TCP
+                port: 443
+
+  - it: renders both agent and gateway NetworkPolicies in direct mode when gateway is enabled
+    set:
+      networkPolicy.enabled: true
+      agents.kiro.gateway.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-openab-kiro
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-openab-kiro-gateway
+        documentIndex: 1
+      - equal:
+          path: spec.podSelector.matchLabels["app.kubernetes.io/component"]
+          value: kiro-gateway
+        documentIndex: 1
+      - contains:
+          path: spec.ingress
+          content:
+            ports:
+              - protocol: TCP
+                port: 8080
+        documentIndex: 1
+
+  - it: renders HTTP egress rule when egress.allowHttp is true (direct mode)
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.allowHttp: true
+    asserts:
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock:
+                  cidr: 0.0.0.0/0
+                  except:
+                    - 169.254.169.254/32
+            ports:
+              - protocol: TCP
+                port: 80
+
+  - it: restricts agent egress to the designated proxy Service in proxy mode
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: proxy
+      networkPolicy.egress.proxy.namespace: egress-proxy
+      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
+      networkPolicy.egress.proxy.ports:
+        - protocol: TCP
+          port: 3128
+    asserts:
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: egress-proxy
+                podSelector:
+                  matchLabels:
+                    app: openshell
+            ports:
+              - protocol: TCP
+                port: 3128
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock:
+                  cidr: 0.0.0.0/0
+                  except:
+                    - 169.254.169.254/32
+            ports:
+              - protocol: TCP
+                port: 443
+          any: true
+
+  - it: applies proxy-mode egress to both agent and gateway policies when gateway is enabled
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: proxy
+      networkPolicy.egress.proxy.namespace: egress-proxy
+      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
+      networkPolicy.egress.proxy.ports:
+        - protocol: TCP
+          port: 3128
+      agents.kiro.gateway.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: egress-proxy
+                podSelector:
+                  matchLabels:
+                    app: openshell
+            ports:
+              - protocol: TCP
+                port: 3128
+        documentIndex: 0
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: egress-proxy
+                podSelector:
+                  matchLabels:
+                    app: openshell
+            ports:
+              - protocol: TCP
+                port: 3128
+        documentIndex: 1
+
+  - it: appends ingress.extraRules verbatim to the agent policy
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.ingress.extraRules:
+        - from:
+            - namespaceSelector:
+                matchLabels:
+                  name: monitoring
+          ports:
+            - protocol: TCP
+              port: 9090
+    asserts:
+      - contains:
+          path: spec.ingress
+          content:
+            from:
+              - namespaceSelector:
+                  matchLabels:
+                    name: monitoring
+            ports:
+              - protocol: TCP
+                port: 9090
+
+  - it: locks egress down to only extraRules when allowDns and allowHttps are false (direct mode)
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.allowDns: false
+      networkPolicy.egress.allowHttps: false
+      networkPolicy.egress.extraRules:
+        - to:
+            - ipBlock:
+                cidr: 10.0.0.0/8
+          ports:
+            - protocol: TCP
+              port: 443
+    asserts:
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - namespaceSelector: {}
+                podSelector:
+                  matchLabels:
+                    k8s-app: kube-dns
+          any: true
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock:
+                  cidr: 0.0.0.0/0
+                  except:
+                    - 169.254.169.254/32
+          any: true
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock:
+                  cidr: 10.0.0.0/8
+            ports:
+              - protocol: TCP
+                port: 443
