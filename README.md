@@ -272,6 +272,11 @@ kubectl create secret generic openab-secret \
 kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/pvc.yaml
 kubectl apply -f k8s/deployment.yaml
+
+# Optional: opt-in pod-level network isolation (deny-all ingress,
+# DNS + HTTPS egress with cloud-metadata exclusion). See the file
+# header for tunable CIDRs / IPv6 exclusions per cloud.
+kubectl apply -f k8s/networkpolicy.yaml
 ```
 
 | Manifest | Purpose |
@@ -280,6 +285,7 @@ kubectl apply -f k8s/deployment.yaml
 | `k8s/configmap.yaml` | `config.toml` mounted at `/etc/openab/` |
 | `k8s/secret.yaml` | `DISCORD_BOT_TOKEN` injected as env var |
 | `k8s/pvc.yaml` | Persistent storage for auth + settings |
+| `k8s/networkpolicy.yaml` | **Optional** pod-level network isolation — deny-all ingress + DNS/HTTPS egress with cloud-metadata (`169.254.169.254`, AWS `fd00:ec2::254`) excluded. Requires a CNI that enforces NetworkPolicy (Calico, Cilium, etc.). |
 
 ## AWS ECS Deployment
 

@@ -13,8 +13,12 @@ spec:
     - Egress
   ingress: []
   egress:
+    # DNS scoped to kube-system to prevent a co-tenant from labelling
+    # their own pod k8s-app=kube-dns to become an approved port-53 destination.
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "kube-system"
           podSelector:
             matchLabels:
               k8s-app: kube-dns
@@ -23,11 +27,20 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # HTTPS to the open internet, IPv4 and IPv6. Cloud metadata service
+    # excluded (169.254.169.254/32 for IPv4, AWS pattern fd00:ec2::254/128
+    # for IPv6) to block a common IAM-credential-theft path from a compromised
+    # pod. Non-AWS IPv6 metadata addresses may need a tighter exclusion —
+    # edit this manifest for your environment.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
               - 169.254.169.254/32
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fd00:ec2::254/128
       ports:
         - protocol: TCP
           port: 443

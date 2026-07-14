@@ -272,6 +272,11 @@ kubectl create secret generic openab-secret \
 kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/pvc.yaml
 kubectl apply -f k8s/deployment.yaml
+
+# 選用：pod 層網路隔離（deny-all ingress、DNS + HTTPS egress，並排除
+# cloud metadata service）。若需要調整 CIDR 或不同雲的 IPv6 metadata
+# 位址，請直接修改該 manifest 檔案開頭的註解。
+kubectl apply -f k8s/networkpolicy.yaml
 ```
 
 | Manifest | 用途 |
@@ -280,6 +285,7 @@ kubectl apply -f k8s/deployment.yaml
 | `k8s/configmap.yaml` | `config.toml` 掛載至 `/etc/openab/` |
 | `k8s/secret.yaml` | 透過 env 注入 `DISCORD_BOT_TOKEN` |
 | `k8s/pvc.yaml` | 持久保存驗證資訊與設定 |
+| `k8s/networkpolicy.yaml` | **選用**：pod 層網路隔離 — deny-all ingress + DNS/HTTPS egress，並排除 cloud metadata（`169.254.169.254`、AWS `fd00:ec2::254`）。需要有 CNI 執行 NetworkPolicy（Calico、Cilium 等）。 |
 
 ## AWS ECS 部署
 

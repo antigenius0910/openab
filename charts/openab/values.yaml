@@ -58,43 +58,74 @@ networkPolicy:
     extraRules: []
 
   egress:
-    # Egress topology. "direct" (default) allows egress to the open internet
-    # (typically DNS + HTTPS). "proxy" restricts egress to a designated proxy
-    # Service — recommended for enterprise / multi-tenant / compliance-driven
-    # deployments (see OpenSHELL prior art).
+    # Egress topology. Must be exactly "direct" or "proxy" — invalid values
+    # fail the render (fail-closed).
+    # - direct: allow DNS + HTTPS (and optionally HTTP) to the open internet
+    #   with cloud metadata (169.254.169.254 / fd00:ec2::254) excluded.
+    #   Hobbyist / dev-cluster / small-team path.
+    # - proxy: allow DNS + egress restricted to a designated proxy Service.
+    #   Enterprise path per OpenSHELL prior art. See "proxy contract" note below.
     mode: direct
 
-    # Allow DNS to kube-dns (UDP+TCP 53). Almost always required in both modes.
-    # Targets pods labelled k8s-app=kube-dns in any namespace (kubeadm / CoreDNS default).
-    # For non-standard DNS setups, disable this and add an appropriate egress.extraRules entry.
+    # Allow DNS egress on UDP/TCP 53 to pods labelled k8s-app=kube-dns.
+    # Applies in both direct and proxy modes.
     allowDns: true
+    # Trusted namespace hosting the DNS pods. Default "kube-system" matches
+    # kubeadm/CoreDNS/kube-dns defaults and prevents a co-tenant from labelling
+    # their own pod k8s-app=kube-dns to become an approved port-53 destination.
+    # Empty string reverts to "any namespace" (legacy behaviour) — use only if
+    # your DNS runs outside kube-system, or set to your DNS namespace directly.
+    dnsNamespace: "kube-system"
 
     # ── mode: direct ────────────────────────────────────────────────────────
-    # Allow HTTPS (TCP 443) to 0.0.0.0/0 EXCEPT the cloud metadata service
-    # (169.254.169.254/32) — blocks a common IAM-credential-theft path from
-    # a compromised agent pod. Ignored when mode=proxy.
+    # Allow HTTPS (TCP 443). Excludes cloud metadata service (169.254.169.254/32
+    # for IPv4, fd00:ec2::254/128 for AWS IPv6) — blocks a common IAM-credential-
+    # theft path from a compromised agent pod. Ignored when mode=proxy.
     allowHttps: true
-    # Allow HTTP (TCP 80) with the same metadata exclusion. Off by default;
-    # enable if hooks / STT fetch over HTTP. Ignored when mode=proxy.
+    # Allow HTTP (TCP 80) with the same metadata exclusion. Off by default.
+    # ⚠️ Enable if any of these fetch over HTTP: `agents.<name>.configUrl`,
+    # lifecycle hooks that download over HTTP (see docs/hooks.md), or STT
+    # base URLs on HTTP. Prefer HTTPS wherever possible. Ignored when mode=proxy.
     allowHttp: false
+    # Allow IPv6 egress in direct mode by adding ::/0 alongside 0.0.0.0/0 in
+    # the HTTPS/HTTP rules, with AWS IMDS IPv6 (fd00:ec2::254/128) excluded.
+    # ⚠️ Non-AWS clouds use different IPv6 metadata addresses; override via
+    # extraRules if you need a tighter exclusion. Turn off on IPv4-only
+    # clusters if you prefer explicit denial to allowing unused v6 ranges.
+    allowIpv6: true
 
     # ── mode: proxy ─────────────────────────────────────────────────────────
-    # When mode=proxy, egress is restricted to this Service selector.
-    # The chart does NOT ship the proxy — deploy it separately (OpenSHELL,
-    # Squid, Envoy, mitmproxy, or anything speaking HTTP CONNECT).
-    # egress.allowDns above still applies. allowHttps/allowHttp are IGNORED.
-    # Example:
-    #   proxy:
-    #     namespace: "egress-proxy"
-    #     podSelector:
-    #       matchLabels:
-    #         app: openshell
-    #     ports:
-    #       - protocol: TCP
-    #         port: 3128
+    # ⚠️ Proxy-mode CONTRACT
+    # NetworkPolicy only ENFORCES the destination allowlist. It does NOT
+    # redirect traffic through the proxy. You must configure your pods to
+    # actually send traffic through the proxy — one common way is env vars:
+    #
+    #   agents.<name>.env:
+    #     HTTPS_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
+    #     HTTP_PROXY:  "http://openshell.egress-proxy.svc.cluster.local:3128"
+    #     NO_PROXY:    ".svc,.cluster.local,10.0.0.0/8"
+    #
+    # And add these variables to inherit_env in your configToml so ACP children
+    # (e.g. claude-agent-acp, kiro-cli, opencode) inherit the proxy settings:
+    #
+    #   [agent]
+    #   inherit_env = ["HTTPS_PROXY","HTTP_PROXY","NO_PROXY"]
+    #
+    # Without both pieces, agent traffic will hit the NetworkPolicy egress deny
+    # and fail to connect. Chart does NOT ship the proxy — deploy it separately
+    # (OpenSHELL, Squid, Envoy, mitmproxy, or anything speaking HTTP CONNECT).
+    #
+    # egress.allowDns above still applies. allowHttps/allowHttp/allowIpv6 are
+    # IGNORED when mode=proxy.
+    #
+    # Rendering fails if proxy.podSelector is empty or proxy.ports is empty
+    # (would otherwise authorize every pod on every port — fail-open).
     proxy:
+      # Namespace hosting the proxy pods. Empty = same namespace as the release.
       namespace: ""
+      # Kubernetes label selector for the proxy pods.
       podSelector: {}
+      # Ports on the proxy pods that agents should reach.
       ports: []
 
     # extraRules: raw NetworkPolicyEgressRule entries appended verbatim.

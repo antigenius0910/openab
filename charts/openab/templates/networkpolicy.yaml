@@ -1,8 +1,24 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $np := .Values.networkPolicy }}
+{{/* ---------- F1: mode and proxy-required-fields validation ---------- */}}
+{{- $mode := $np.egress.mode | default "direct" }}
+{{- if not (or (eq $mode "direct") (eq $mode "proxy")) }}
+{{- fail (printf "networkPolicy.egress.mode must be exactly \"direct\" or \"proxy\" (got %q)" $mode) }}
+{{- end }}
+{{- if eq $mode "proxy" }}
+{{- if not (or $np.egress.proxy.podSelector.matchLabels $np.egress.proxy.podSelector.matchExpressions) }}
+{{- fail "networkPolicy.egress.mode=proxy requires networkPolicy.egress.proxy.podSelector.matchLabels or matchExpressions to be non-empty (an empty selector authorizes every pod in the namespace)" }}
+{{- end }}
+{{- if not $np.egress.proxy.ports }}
+{{- fail "networkPolicy.egress.mode=proxy requires networkPolicy.egress.proxy.ports to be non-empty (an empty ports list authorizes every port)" }}
+{{- end }}
+{{- end }}
 {{- range $name, $cfg := .Values.agents }}
 {{- if ne (include "openab.agentEnabled" $cfg) "false" }}
 {{- $d := dict "ctx" $ "agent" $name "cfg" $cfg }}
+{{/* F2: chart-managed gateway is deployed iff gateway.enabled AND gateway.deploy != false (matches templates/gateway.yaml) */}}
+{{- $gwDeployed := and (($cfg.gateway).enabled) (ne (($cfg.gateway).deploy | toString) "false") }}
+{{- $gwD := dict "ctx" $ "agent" (printf "%s-gateway" $name) "cfg" (omit $cfg "nameOverride") }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -25,9 +41,17 @@ spec:
     {{- end }}
   egress:
 {{ include "openab.networkPolicyEgress" (dict "np" $np) | indent 4 }}
-{{- if and (($cfg.gateway).enabled) (ne (($cfg.gateway).deploy | default true | toString) "false") }}
-{{- $gwCfg := omit $cfg "nameOverride" }}
-{{- $gwD := dict "ctx" $ "agent" (printf "%s-gateway" $name) "cfg" $gwCfg }}
+{{- if $gwDeployed }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "openab.selectorLabels" $gwD | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}
+{{- if $gwDeployed }}
+{{/* F3: use the same deploy check as templates/gateway.yaml — avoid orphan NPs */}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -61,33 +85,43 @@ spec:
 {{- define "openab.networkPolicyEgress" -}}
 {{- $np := .np -}}
 {{- if $np.egress.allowDns -}}
+{{/* F4: default DNS destination scoped to a trusted namespace (usually kube-system).
+       Empty dnsNamespace preserves the legacy any-namespace behaviour for exotic DNS setups. */}}
 - to:
+{{- if $np.egress.dnsNamespace }}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ $np.egress.dnsNamespace | quote }}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+{{- else }}
     - namespaceSelector: {}
       podSelector:
         matchLabels:
           k8s-app: kube-dns
+{{- end }}
   ports:
     - protocol: UDP
       port: 53
     - protocol: TCP
       port: 53
 {{- end }}
-{{- if eq $np.egress.mode "proxy" }}
+{{- if eq ($np.egress.mode | default "direct") "proxy" }}
 - to:
 {{- if $np.egress.proxy.namespace }}
+{{/* F7: quote the namespace value — bare all-numeric namespace names YAML-parse as int */}}
     - namespaceSelector:
         matchLabels:
-          kubernetes.io/metadata.name: {{ $np.egress.proxy.namespace }}
+          kubernetes.io/metadata.name: {{ $np.egress.proxy.namespace | quote }}
       podSelector:
         {{- toYaml $np.egress.proxy.podSelector | nindent 8 }}
 {{- else }}
     - podSelector:
         {{- toYaml $np.egress.proxy.podSelector | nindent 8 }}
 {{- end }}
-{{- with $np.egress.proxy.ports }}
   ports:
-    {{- toYaml . | nindent 4 }}
-{{- end }}
+    {{- toYaml $np.egress.proxy.ports | nindent 4 }}
 {{- else }}
 {{- if $np.egress.allowHttps }}
 - to:
@@ -95,6 +129,13 @@ spec:
         cidr: 0.0.0.0/0
         except:
           - 169.254.169.254/32
+{{- if $np.egress.allowIpv6 }}
+{{/* F8: IPv6 IMDS excludes the AWS pattern; other clouds may need extraRules */}}
+    - ipBlock:
+        cidr: ::/0
+        except:
+          - fd00:ec2::254/128
+{{- end }}
   ports:
     - protocol: TCP
       port: 443
@@ -105,6 +146,12 @@ spec:
         cidr: 0.0.0.0/0
         except:
           - 169.254.169.254/32
+{{- if $np.egress.allowIpv6 }}
+    - ipBlock:
+        cidr: ::/0
+        except:
+          - fd00:ec2::254/128
+{{- end }}
   ports:
     - protocol: TCP
       port: 80

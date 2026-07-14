@@ -8,7 +8,7 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: renders a single agent NetworkPolicy in direct mode (gateway off) with deny-all ingress and DNS + HTTPS egress
+  - it: renders a single agent NetworkPolicy in direct mode (gateway off) with deny-all ingress, DNS scoped to kube-system, and IPv4+IPv6 HTTPS egress
     set:
       networkPolicy.enabled: true
     asserts:
@@ -33,7 +33,9 @@ tests:
           path: spec.egress
           content:
             to:
-              - namespaceSelector: {}
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: kube-system
                 podSelector:
                   matchLabels:
                     k8s-app: kube-dns
@@ -50,11 +52,15 @@ tests:
                   cidr: 0.0.0.0/0
                   except:
                     - 169.254.169.254/32
+              - ipBlock:
+                  cidr: ::/0
+                  except:
+                    - fd00:ec2::254/128
             ports:
               - protocol: TCP
                 port: 443
 
-  - it: renders both agent and gateway NetworkPolicies in direct mode when gateway is enabled
+  - it: renders both agent and gateway NetworkPolicies in direct mode when gateway is deployed, and the agent policy authorizes TCP 8080 to the gateway pod (F2)
     set:
       networkPolicy.enabled: true
       agents.kiro.gateway.enabled: true
@@ -80,8 +86,46 @@ tests:
               - protocol: TCP
                 port: 8080
         documentIndex: 1
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: openab
+                    app.kubernetes.io/instance: RELEASE-NAME
+                    app.kubernetes.io/component: kiro-gateway
+            ports:
+              - protocol: TCP
+                port: 8080
+        documentIndex: 0
 
-  - it: renders HTTP egress rule when egress.allowHttp is true (direct mode)
+  - it: does NOT render a gateway NetworkPolicy or an agent→gateway egress rule when gateway.enabled=true but gateway.deploy=false (F3 regression — matches templates/gateway.yaml condition)
+    set:
+      networkPolicy.enabled: true
+      agents.kiro.gateway.enabled: true
+      agents.kiro.gateway.deploy: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-openab-kiro
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: openab
+                    app.kubernetes.io/instance: RELEASE-NAME
+                    app.kubernetes.io/component: kiro-gateway
+            ports:
+              - protocol: TCP
+                port: 8080
+          any: true
+
+  - it: renders HTTP egress rule (IPv4+IPv6) when egress.allowHttp is true (direct mode)
     set:
       networkPolicy.enabled: true
       networkPolicy.egress.allowHttp: true
@@ -94,11 +138,60 @@ tests:
                   cidr: 0.0.0.0/0
                   except:
                     - 169.254.169.254/32
+              - ipBlock:
+                  cidr: ::/0
+                  except:
+                    - fd00:ec2::254/128
             ports:
               - protocol: TCP
                 port: 80
 
-  - it: restricts agent egress to the designated proxy Service in proxy mode
+  - it: omits IPv6 ipBlock when allowIpv6=false (direct mode, IPv4-only cluster) (F8)
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.allowIpv6: false
+    asserts:
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock:
+                  cidr: 0.0.0.0/0
+                  except:
+                    - 169.254.169.254/32
+            ports:
+              - protocol: TCP
+                port: 443
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock:
+                  cidr: ::/0
+                  except:
+                    - fd00:ec2::254/128
+          any: true
+
+  - it: falls back to any-namespace DNS when egress.dnsNamespace is empty string (F4 legacy escape hatch)
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.dnsNamespace: ""
+    asserts:
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - namespaceSelector: {}
+                podSelector:
+                  matchLabels:
+                    k8s-app: kube-dns
+            ports:
+              - protocol: UDP
+                port: 53
+              - protocol: TCP
+                port: 53
+
+  - it: restricts agent egress to the designated proxy Service in proxy mode (F5 — enforcement only)
     set:
       networkPolicy.enabled: true
       networkPolicy.egress.mode: proxy
@@ -129,12 +222,30 @@ tests:
                   cidr: 0.0.0.0/0
                   except:
                     - 169.254.169.254/32
+              - ipBlock:
+                  cidr: ::/0
+                  except:
+                    - fd00:ec2::254/128
             ports:
               - protocol: TCP
                 port: 443
           any: true
 
-  - it: applies proxy-mode egress to both agent and gateway policies when gateway is enabled
+  - it: quotes an all-numeric proxy namespace so it renders as a string, not a YAML integer (F7)
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: proxy
+      networkPolicy.egress.proxy.namespace: "1234"
+      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
+      networkPolicy.egress.proxy.ports:
+        - protocol: TCP
+          port: 3128
+    asserts:
+      - equal:
+          path: spec.egress[1].to[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "1234"
+
+  - it: applies proxy-mode egress to both agent and gateway policies when gateway is deployed
     set:
       networkPolicy.enabled: true
       networkPolicy.egress.mode: proxy
@@ -216,7 +327,9 @@ tests:
           path: spec.egress
           content:
             to:
-              - namespaceSelector: {}
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: kube-system
                 podSelector:
                   matchLabels:
                     k8s-app: kube-dns
@@ -229,6 +342,10 @@ tests:
                   cidr: 0.0.0.0/0
                   except:
                     - 169.254.169.254/32
+              - ipBlock:
+                  cidr: ::/0
+                  except:
+                    - fd00:ec2::254/128
           any: true
       - contains:
           path: spec.egress
@@ -239,3 +356,33 @@ tests:
             ports:
               - protocol: TCP
                 port: 443
+
+  # ── F1 negative tests: fail-closed validation ─────────────────────────────
+
+  - it: fails rendering when egress.mode is not exactly "direct" or "proxy" (F1)
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: proxxy
+    asserts:
+      - failedTemplate:
+          errorMessage: 'networkPolicy.egress.mode must be exactly "direct" or "proxy" (got "proxxy")'
+
+  - it: fails rendering when mode=proxy but proxy.podSelector is empty (F1)
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: proxy
+      networkPolicy.egress.proxy.ports:
+        - protocol: TCP
+          port: 3128
+    asserts:
+      - failedTemplate:
+          errorMessage: 'networkPolicy.egress.mode=proxy requires networkPolicy.egress.proxy.podSelector.matchLabels or matchExpressions to be non-empty (an empty selector authorizes every pod in the namespace)'
+
+  - it: fails rendering when mode=proxy but proxy.ports is empty (F1)
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: proxy
+      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
+    asserts:
+      - failedTemplate:
+          errorMessage: 'networkPolicy.egress.mode=proxy requires networkPolicy.egress.proxy.ports to be non-empty (an empty ports list authorizes every port)'
