@@ -1405,6 +1405,43 @@ impl ToolEntry {
 /// during streaming before collapsing into a summary line.
 const TOOL_COLLAPSE_THRESHOLD: usize = 3;
 
+/// Render an iterator of tool entries into one line per **consecutive** run of
+/// entries with the same `(title, state)`. Repeated invocations of the same
+/// tool (e.g. Claude calling `ToolSearch` three times in a row) collapse from
+/// three identical `✅ \`ToolSearch\`` lines into one `✅ \`ToolSearch\` (×3)`.
+///
+/// Only consecutive runs are grouped — two `curl` calls with an intervening
+/// `grep` render as three separate lines, preserving the actual call order.
+fn render_grouped<'a>(entries: impl IntoIterator<Item = &'a ToolEntry>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut run: Option<(String, ToolState, usize)> = None;
+    let flush = |run: &mut Option<(String, ToolState, usize)>, out: &mut Vec<String>| {
+        if let Some((title, state, count)) = run.take() {
+            let entry = ToolEntry {
+                id: String::new(),
+                title,
+                state,
+            };
+            let mut line = entry.render();
+            if count > 1 {
+                line.push_str(&format!(" (×{count})"));
+            }
+            out.push(line);
+        }
+    };
+    for e in entries {
+        match &mut run {
+            Some((t, s, n)) if *t == e.title && *s == e.state => *n += 1,
+            _ => {
+                flush(&mut run, &mut out);
+                run = Some((e.title.clone(), e.state, 1));
+            }
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
 // --- Empty-turn classification (pure helper, unit-testable) ---
 
 /// Message to show the consumer when a silent failure is detected.
@@ -1472,8 +1509,10 @@ fn compose_display(
                         .collect();
 
                     if finished <= TOOL_COLLAPSE_THRESHOLD {
-                        for entry in tool_lines.iter().filter(|e| e.state != ToolState::Running) {
-                            out.push_str(&entry.render());
+                        for line in render_grouped(
+                            tool_lines.iter().filter(|e| e.state != ToolState::Running),
+                        ) {
+                            out.push_str(&line);
                             out.push('\n');
                         }
                     } else {
@@ -1488,21 +1527,23 @@ fn compose_display(
                     }
 
                     if running_entries.len() <= TOOL_COLLAPSE_THRESHOLD {
-                        for entry in &running_entries {
-                            out.push_str(&entry.render());
+                        for line in render_grouped(running_entries.iter().copied()) {
+                            out.push_str(&line);
                             out.push('\n');
                         }
                     } else {
                         let hidden = running_entries.len() - TOOL_COLLAPSE_THRESHOLD;
                         out.push_str(&format!("🔧 {hidden} more running\n"));
-                        for entry in running_entries.iter().skip(hidden) {
-                            out.push_str(&entry.render());
+                        for line in
+                            render_grouped(running_entries.iter().skip(hidden).copied())
+                        {
+                            out.push_str(&line);
                             out.push('\n');
                         }
                     }
                 } else {
-                    for entry in tool_lines {
-                        out.push_str(&entry.render());
+                    for line in render_grouped(tool_lines.iter()) {
+                        out.push_str(&line);
                         out.push('\n');
                     }
                 }
@@ -1906,6 +1947,52 @@ mod tests {
         let out = compose_display(&tools, "", true, ToolDisplay::Compact);
         assert!(out.contains("✅ 1"), "expected completed count: {out}");
         assert!(out.contains("🔧 1"), "expected running count: {out}");
+    }
+
+    #[test]
+    fn compose_display_full_collapses_consecutive_duplicates() {
+        // Claude often calls the same tool multiple times in a row (e.g. three
+        // ToolSearch calls to look up related MCP tools). Show one line with a
+        // ×N suffix instead of three identical lines.
+        let tools = vec![
+            tool("1", "ToolSearch", ToolState::Completed),
+            tool("2", "ToolSearch", ToolState::Completed),
+            tool("3", "ToolSearch", ToolState::Completed),
+        ];
+        let out = compose_display(&tools, "done", false, ToolDisplay::Full);
+        assert!(
+            out.contains("`ToolSearch` (×3)"),
+            "expected grouped line: {out}"
+        );
+        // Must render only one tool line, not three
+        assert_eq!(out.matches("`ToolSearch`").count(), 1, "output: {out}");
+    }
+
+    #[test]
+    fn compose_display_full_preserves_order_across_different_titles() {
+        // A `curl` between two `grep`s should not merge the grep entries.
+        let tools = vec![
+            tool("1", "grep", ToolState::Completed),
+            tool("2", "curl", ToolState::Completed),
+            tool("3", "grep", ToolState::Completed),
+        ];
+        let out = compose_display(&tools, "done", false, ToolDisplay::Full);
+        assert!(!out.contains("(×"), "should not collapse across order: {out}");
+        assert_eq!(out.matches("`grep`").count(), 2, "output: {out}");
+        assert_eq!(out.matches("`curl`").count(), 1, "output: {out}");
+    }
+
+    #[test]
+    fn compose_display_full_groups_mixed_state_runs_separately() {
+        // Same title but different states must NOT merge (completed vs failed).
+        let tools = vec![
+            tool("1", "curl", ToolState::Completed),
+            tool("2", "curl", ToolState::Failed),
+            tool("3", "curl", ToolState::Failed),
+        ];
+        let out = compose_display(&tools, "done", false, ToolDisplay::Full);
+        assert!(out.contains("✅ `curl`"), "output: {out}");
+        assert!(out.contains("❌ `curl` (×2)"), "output: {out}");
     }
 
     #[test]
