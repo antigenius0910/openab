@@ -78,42 +78,68 @@ networkPolicy:
     dnsNamespace: "kube-system"
 
     # ── mode: direct ────────────────────────────────────────────────────────
-    # Allow HTTPS (TCP 443). Excludes cloud metadata service (169.254.169.254/32
-    # for IPv4, fd00:ec2::254/128 for AWS IPv6) — blocks a common IAM-credential-
-    # theft path from a compromised agent pod. Ignored when mode=proxy.
+    # Allow HTTPS (TCP 443). Excludes cloud metadata (see metadataExclusions
+    # below) — blocks a common IAM-credential-theft path from a compromised
+    # agent pod. Ignored when mode=proxy.
     allowHttps: true
     # Allow HTTP (TCP 80) with the same metadata exclusion. Off by default.
     # ⚠️ Enable if any of these fetch over HTTP: `agents.<name>.configUrl`,
     # lifecycle hooks that download over HTTP (see docs/hooks.md), or STT
     # base URLs on HTTP. Prefer HTTPS wherever possible. Ignored when mode=proxy.
     allowHttp: false
-    # Allow IPv6 egress in direct mode by adding ::/0 alongside 0.0.0.0/0 in
-    # the HTTPS/HTTP rules, with AWS IMDS IPv6 (fd00:ec2::254/128) excluded.
-    # ⚠️ Non-AWS clouds use different IPv6 metadata addresses; override via
-    # extraRules if you need a tighter exclusion. Turn off on IPv4-only
-    # clusters if you prefer explicit denial to allowing unused v6 ranges.
+    # Add ::/0 to HTTPS/HTTP rules alongside 0.0.0.0/0 for IPv6 egress.
+    # Turn off on IPv4-only clusters if you prefer explicit denial to
+    # allowing unused v6 ranges. Ignored when mode=proxy.
     allowIpv6: true
+    # Cloud metadata CIDRs excluded from the direct-mode HTTPS/HTTP rules.
+    # NetworkPolicy allow rules combine additively — you CANNOT add another
+    # exclusion via extraRules; you must edit these lists directly (or set
+    # allowHttps=false + supply a complete replacement rule via extraRules).
+    #
+    # Defaults cover AWS (169.254.169.254 works for GCP and Azure too;
+    # IPv6 IMDS varies by cloud).
+    #   AWS IPv6 IMDS: fd00:ec2::254/128
+    #   GCP:           fd00::/8 metadata routing varies — check your setup
+    #   Azure:         IPv4 only (169.254.169.254)
+    #   IBM Cloud:     161.26.0.0/16 (IPv4)
+    metadataExclusions:
+      ipv4:
+        - 169.254.169.254/32
+      ipv6:
+        - fd00:ec2::254/128
 
     # ── mode: proxy ─────────────────────────────────────────────────────────
     # ⚠️ Proxy-mode CONTRACT
     # NetworkPolicy only ENFORCES the destination allowlist. It does NOT
-    # redirect traffic through the proxy. You must configure your pods to
-    # actually send traffic through the proxy — one common way is env vars:
+    # redirect traffic through the proxy. You must configure BOTH the agent
+    # AND the chart-managed gateway (if deployed) to route their outbound
+    # traffic through the proxy — otherwise the NetworkPolicy deny will
+    # break platform API calls (Telegram replies, Teams OAuth, LLM APIs).
     #
-    #   agents.<name>.env:
-    #     HTTPS_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
-    #     HTTP_PROXY:  "http://openshell.egress-proxy.svc.cluster.local:3128"
-    #     NO_PROXY:    ".svc,.cluster.local,10.0.0.0/8"
+    # 1. Agent — set proxy env vars via agents.<name>.env AND add them to
+    #    inherit_env in configToml so ACP children (claude-agent-acp,
+    #    kiro-cli, opencode, etc.) inherit them:
     #
-    # And add these variables to inherit_env in your configToml so ACP children
-    # (e.g. claude-agent-acp, kiro-cli, opencode) inherit the proxy settings:
+    #      agents.<name>.env:
+    #        HTTPS_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
+    #        HTTP_PROXY:  "http://openshell.egress-proxy.svc.cluster.local:3128"
+    #        NO_PROXY:    ".svc,.cluster.local,10.0.0.0/8"
     #
-    #   [agent]
-    #   inherit_env = ["HTTPS_PROXY","HTTP_PROXY","NO_PROXY"]
+    #      agents.<name>.configToml: |
+    #        [agent]
+    #        inherit_env = ["HTTPS_PROXY","HTTP_PROXY","NO_PROXY"]
     #
-    # Without both pieces, agent traffic will hit the NetworkPolicy egress deny
-    # and fail to connect. Chart does NOT ship the proxy — deploy it separately
-    # (OpenSHELL, Squid, Envoy, mitmproxy, or anything speaking HTTP CONNECT).
+    # 2. Gateway — the gateway pod ALSO makes outbound HTTPS calls (Telegram
+    #    replies, Teams OAuth token exchange, Feishu/WeCom APIs, etc.). Set
+    #    the same env vars on it via the new agents.<name>.gateway.env field:
+    #
+    #      agents.<name>.gateway.env:
+    #        HTTPS_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
+    #        HTTP_PROXY:  "http://openshell.egress-proxy.svc.cluster.local:3128"
+    #        NO_PROXY:    ".svc,.cluster.local,10.0.0.0/8"
+    #
+    # Chart does NOT ship the proxy — deploy it separately (OpenSHELL,
+    # Squid, Envoy, mitmproxy, or anything speaking HTTP CONNECT).
     #
     # egress.allowDns above still applies. allowHttps/allowHttp/allowIpv6 are
     # IGNORED when mode=proxy.
@@ -496,6 +522,19 @@ agents:
       strategy: "Recreate"  # Recreate (default, prevents concurrent WS conflicts) or RollingUpdate
       resources: {}     # e.g. { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 128Mi } }
       rustLog: "info"   # RUST_LOG for gateway container (e.g. "openab_gateway=debug")
+      # Additional environment variables for the gateway container.
+      # Useful for injecting HTTPS_PROXY / HTTP_PROXY / NO_PROXY when running
+      # under networkPolicy.egress.mode=proxy (the gateway also makes outbound
+      # HTTPS calls to platform APIs — Telegram replies, Teams OAuth, etc.).
+      # Example:
+      #   env:
+      #     HTTPS_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
+      #     HTTP_PROXY:  "http://openshell.egress-proxy.svc.cluster.local:3128"
+      #     NO_PROXY:    ".svc,.cluster.local,10.0.0.0/8"
+      env: {}
+      # Load additional env vars into the gateway from existing Secrets or ConfigMaps.
+      # Same shape as agent-level `envFrom` (list of secretRef/configMapRef entries).
+      envFrom: []
       nodeSelector: {}
       tolerations: []
       affinity: {}

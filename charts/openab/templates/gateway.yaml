@@ -220,6 +220,14 @@ spec:
             {{- end }}
             - name: RUST_LOG
               value: {{ ($cfg.gateway).rustLog | default "info" | quote }}
+            {{- range $k, $v := ($cfg.gateway).env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- with ($cfg.gateway).envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health
