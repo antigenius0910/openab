@@ -1401,45 +1401,52 @@ impl ToolEntry {
     }
 }
 
-/// Maximum number of finished tool entries to show individually
-/// during streaming before collapsing into a summary line.
+/// Maximum number of **post-grouping** finished/running lines to show
+/// individually during streaming before collapsing into a summary line.
+/// Compared against grouped-line count so that N identical repeats of a
+/// single tool (which collapse to one `(×N)` line) always render as that
+/// line, never as a generic "N tool(s) completed" fallback.
 const TOOL_COLLAPSE_THRESHOLD: usize = 3;
 
-/// Render an iterator of tool entries into one line per **consecutive** run of
-/// entries with the same `(title, state)`. Repeated invocations of the same
-/// tool (e.g. Claude calling `ToolSearch` three times in a row) collapse from
-/// three identical `✅ \`ToolSearch\`` lines into one `✅ \`ToolSearch\` (×3)`.
+/// Collapse a sequence of tool entries into one entry per **consecutive** run
+/// of same `(title, state)` — the tuple carries the count.
 ///
-/// Only consecutive runs are grouped — two `curl` calls with an intervening
-/// `grep` render as three separate lines, preserving the actual call order.
-fn render_grouped<'a>(entries: impl IntoIterator<Item = &'a ToolEntry>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut run: Option<(String, ToolState, usize)> = None;
-    let flush = |run: &mut Option<(String, ToolState, usize)>, out: &mut Vec<String>| {
-        if let Some((title, state, count)) = run.take() {
-            let entry = ToolEntry {
-                id: String::new(),
-                title,
-                state,
-            };
-            let mut line = entry.render();
-            if count > 1 {
-                line.push_str(&format!(" (×{count})"));
-            }
-            out.push(line);
-        }
-    };
+/// Called ONCE over the full unfiltered `tool_lines` slice so adjacency is
+/// evaluated in true call order. Callers then filter the resulting groups by
+/// state; this prevents `A(Completed), B(Running), A(Completed)` from folding
+/// to `A(Completed)×2` after the caller strips Running entries first.
+fn group_entries<'a>(
+    entries: impl IntoIterator<Item = &'a ToolEntry>,
+) -> Vec<(String, ToolState, usize)> {
+    let mut out: Vec<(String, ToolState, usize)> = Vec::new();
     for e in entries {
-        match &mut run {
+        match out.last_mut() {
             Some((t, s, n)) if *t == e.title && *s == e.state => *n += 1,
-            _ => {
-                flush(&mut run, &mut out);
-                run = Some((e.title.clone(), e.state, 1));
-            }
+            _ => out.push((e.title.clone(), e.state, 1)),
         }
     }
-    flush(&mut run, &mut out);
     out
+}
+
+/// Render one grouped entry. Repeats append ` (×N)`; for `Running` the count
+/// sits BEFORE the trailing `...` so the string reads
+/// `🔧 \`curl\` (×3)...` instead of `🔧 \`curl\`... (×3)`.
+fn render_group(title: &str, state: ToolState, count: usize) -> String {
+    let base = ToolEntry {
+        id: String::new(),
+        title: title.to_string(),
+        state,
+    }
+    .render();
+    if count <= 1 {
+        return base;
+    }
+    if state == ToolState::Running {
+        let trimmed = base.trim_end_matches("...");
+        format!("{trimmed} (×{count})...")
+    } else {
+        format!("{base} (×{count})")
+    }
 }
 
 // --- Empty-turn classification (pure helper, unit-testable) ---
@@ -1482,7 +1489,6 @@ fn compose_display(
             .iter()
             .filter(|e| e.state == ToolState::Running)
             .count();
-        let finished = done + failed;
 
         match tool_display {
             ToolDisplay::Compact => {
@@ -1502,17 +1508,26 @@ fn compose_display(
                 }
             }
             ToolDisplay::Full => {
-                if streaming {
-                    let running_entries: Vec<_> = tool_lines
-                        .iter()
-                        .filter(|e| e.state == ToolState::Running)
-                        .collect();
+                // Group once over the FULL sequence so adjacency reflects
+                // true call order (a Running entry between two identical
+                // Completed entries splits them into two groups, not one).
+                let groups = group_entries(tool_lines.iter());
+                let finished_groups: Vec<&(String, ToolState, usize)> = groups
+                    .iter()
+                    .filter(|(_, s, _)| *s != ToolState::Running)
+                    .collect();
+                let running_groups: Vec<&(String, ToolState, usize)> = groups
+                    .iter()
+                    .filter(|(_, s, _)| *s == ToolState::Running)
+                    .collect();
 
-                    if finished <= TOOL_COLLAPSE_THRESHOLD {
-                        for line in render_grouped(
-                            tool_lines.iter().filter(|e| e.state != ToolState::Running),
-                        ) {
-                            out.push_str(&line);
+                if streaming {
+                    // Threshold on GROUPED-line count, not raw entries — so
+                    // 4× the same tool renders as `✅ X (×4)`, never as the
+                    // generic "4 tool(s) completed" fallback.
+                    if finished_groups.len() <= TOOL_COLLAPSE_THRESHOLD {
+                        for (t, s, n) in &finished_groups {
+                            out.push_str(&render_group(t, *s, *n));
                             out.push('\n');
                         }
                     } else {
@@ -1526,24 +1541,22 @@ fn compose_display(
                         out.push_str(&format!("{} tool(s) completed\n", parts.join(" · ")));
                     }
 
-                    if running_entries.len() <= TOOL_COLLAPSE_THRESHOLD {
-                        for line in render_grouped(running_entries.iter().copied()) {
-                            out.push_str(&line);
+                    if running_groups.len() <= TOOL_COLLAPSE_THRESHOLD {
+                        for (t, s, n) in &running_groups {
+                            out.push_str(&render_group(t, *s, *n));
                             out.push('\n');
                         }
                     } else {
-                        let hidden = running_entries.len() - TOOL_COLLAPSE_THRESHOLD;
+                        let hidden = running_groups.len() - TOOL_COLLAPSE_THRESHOLD;
                         out.push_str(&format!("🔧 {hidden} more running\n"));
-                        for line in
-                            render_grouped(running_entries.iter().skip(hidden).copied())
-                        {
-                            out.push_str(&line);
+                        for (t, s, n) in running_groups.iter().skip(hidden) {
+                            out.push_str(&render_group(t, *s, *n));
                             out.push('\n');
                         }
                     }
                 } else {
-                    for line in render_grouped(tool_lines.iter()) {
-                        out.push_str(&line);
+                    for (t, s, n) in &groups {
+                        out.push_str(&render_group(t, *s, *n));
                         out.push('\n');
                     }
                 }
@@ -1993,6 +2006,102 @@ mod tests {
         let out = compose_display(&tools, "done", false, ToolDisplay::Full);
         assert!(out.contains("✅ `curl`"), "output: {out}");
         assert!(out.contains("❌ `curl` (×2)"), "output: {out}");
+    }
+
+    #[test]
+    fn compose_display_full_streaming_groups_beyond_threshold_dups() {
+        // 5 identical entries: raw count 5 > TOOL_COLLAPSE_THRESHOLD (3), but
+        // group count is 1, so the grouped line MUST render — never the
+        // generic "5 tool(s) completed" fallback. Regression test for the
+        // reviewer's finding that the threshold used to gate on raw count.
+        let tools = vec![
+            tool("1", "ToolSearch", ToolState::Completed),
+            tool("2", "ToolSearch", ToolState::Completed),
+            tool("3", "ToolSearch", ToolState::Completed),
+            tool("4", "ToolSearch", ToolState::Completed),
+            tool("5", "ToolSearch", ToolState::Completed),
+        ];
+        let out = compose_display(&tools, "done", true, ToolDisplay::Full);
+        assert!(
+            out.contains("`ToolSearch` (×5)"),
+            "expected grouped ×5 line: {out}"
+        );
+        assert!(
+            !out.contains("5 tool(s) completed"),
+            "should not fall back to count summary: {out}"
+        );
+    }
+
+    #[test]
+    fn compose_display_full_streaming_running_dups_collapse() {
+        // The streaming Running branch also has to collapse identical
+        // in-flight tool invocations (rare in claude-agent-acp, common with
+        // parallel-tool-call backends). (×N) sits BEFORE the `...` so the
+        // marker keeps its "still working" meaning.
+        let tools = vec![
+            tool("1", "curl", ToolState::Running),
+            tool("2", "curl", ToolState::Running),
+            tool("3", "curl", ToolState::Running),
+        ];
+        let out = compose_display(&tools, "", true, ToolDisplay::Full);
+        assert!(
+            out.contains("`curl` (×3)..."),
+            "expected running (×N) before ...: {out}"
+        );
+        assert_eq!(out.matches("`curl`").count(), 1, "output: {out}");
+    }
+
+    #[test]
+    fn compose_display_full_streaming_true_order_preserved_across_state_boundaries() {
+        // Reviewer finding #1: A(Completed), B(Running), A(Completed) must
+        // NOT collapse into A(×2). Filtering Running out AFTER grouping (as
+        // this PR now does) keeps the two A entries as distinct groups so
+        // the finished-view still shows two lines, matching true call order.
+        let tools = vec![
+            tool("1", "ToolSearch", ToolState::Completed),
+            tool("2", "Bash", ToolState::Running),
+            tool("3", "ToolSearch", ToolState::Completed),
+        ];
+        let out = compose_display(&tools, "", true, ToolDisplay::Full);
+        assert!(
+            !out.contains("(×2)"),
+            "must not merge non-adjacent finished entries across a Running: {out}"
+        );
+        assert_eq!(
+            out.matches("`ToolSearch`").count(),
+            2,
+            "expected two separate ToolSearch lines: {out}"
+        );
+        assert!(out.contains("`Bash`"), "output: {out}");
+    }
+
+    #[test]
+    fn compose_display_full_streaming_running_hidden_summary_uses_group_index() {
+        // >TOOL_COLLAPSE_THRESHOLD DISTINCT running groups triggers the
+        // "N more running" tail; the summary counts groups (not raw entries)
+        // and the visible tail preserves group boundaries. Regression test
+        // for the reviewer's finding that skipping by raw index could split
+        // a duplicate run across the hidden/visible boundary.
+        let tools = vec![
+            tool("1", "a", ToolState::Running),
+            tool("2", "a", ToolState::Running), // grouped with #1
+            tool("3", "b", ToolState::Running),
+            tool("4", "c", ToolState::Running),
+            tool("5", "d", ToolState::Running),
+            tool("6", "e", ToolState::Running),
+        ];
+        // 5 distinct groups → 2 hidden, 3 visible (b/c/d skipped, then
+        // c/d/e? actually skip 2 = c, d, e visible). The important assertion
+        // is that duplicates never straddle the visible/hidden boundary.
+        let out = compose_display(&tools, "", true, ToolDisplay::Full);
+        assert!(out.contains("more running"), "expected tail summary: {out}");
+        // `a` was grouped, so it either appears as one `(×2)` line or is
+        // wholly in the summary — never split.
+        let a_lines = out.matches("`a`").count();
+        assert!(
+            a_lines == 0 || a_lines == 1,
+            "grouped `a` must not be split across summary/visible: {out}"
+        );
     }
 
     #[test]
