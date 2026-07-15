@@ -46,6 +46,15 @@ containerSecurityContext:
 # NetworkPolicy for pod-level network isolation. Opt-in and backwards-compatible:
 # no NetworkPolicy resource is rendered unless networkPolicy.enabled=true.
 # See RFC: https://github.com/openabdev/openab/issues/1394
+#
+# ⚠️ PREREQUISITE — CNI enforcement
+# A NetworkPolicy has NO EFFECT unless the cluster's CNI enforces it. Verify
+# your cluster runs a supported CNI (Calico, Cilium, Antrea, EKS with the
+# VPC CNI + NetworkPolicy add-on, GKE with Dataplane V2 or Calico, AKS with
+# Azure NPM or Calico, etc.). On stock KIND, Docker Desktop, or a bare-EKS
+# cluster without NetworkPolicy support, enabling this flag renders a
+# resource that the CNI simply ignores — you get a false sense of isolation.
+# Test with a deny-all policy in a scratch namespace before relying on it.
 networkPolicy:
   enabled: false
 
@@ -95,6 +104,17 @@ networkPolicy:
     # NetworkPolicy allow rules combine additively — you CANNOT add another
     # exclusion via extraRules; you must edit these lists directly (or set
     # allowHttps=false + supply a complete replacement rule via extraRules).
+    #
+    # ⚠️ Treat this as defense-in-depth, NOT a portable IMDS guarantee:
+    #   - Kubernetes NetworkPolicy always permits traffic between a pod and
+    #     its own resident node — a compromised pod scheduled on the node
+    #     running metadata-service DNAT can still reach IMDS.
+    #   - The order of address rewriting (SNAT/DNAT) vs. `ipBlock` matching
+    #     is CNI-implementation-dependent — some CNIs match on pre-NAT
+    #     addresses, others on post-NAT.
+    #   - Cloud-provider hardening (IMDSv2 mandatory / hop-limit 1, disable
+    #     IMDSv1, GCP metadata concealment, Azure metadata endpoint policy)
+    #     is the primary control. This exclusion is a secondary net.
     #
     # Defaults cover AWS (169.254.169.254 works for GCP and Azure too;
     # IPv6 IMDS varies by cloud).

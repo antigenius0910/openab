@@ -11,7 +11,11 @@ tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# `system-proxy` re-enables HTTPS_PROXY / HTTP_PROXY / NO_PROXY env-var auto-detection,
+# which is a default reqwest feature disabled by `default-features = false`. Required so
+# the gateway respects proxy env vars injected via chart `agents.<name>.gateway.env` when
+# running under `networkPolicy.egress.mode=proxy`. See PR #1400.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "system-proxy"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
