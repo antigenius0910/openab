@@ -130,6 +130,34 @@ networkPolicy:
 
     # extraRules: raw NetworkPolicyEgressRule entries appended verbatim.
     # Use to open extra ports or add cluster-specific carve-outs.
+    #
+    # ⚠️ Non-80/443 destinations REQUIRE an explicit entry here.
+    # allowHttps only opens TCP 443, and allowHttp only opens TCP 80. If any
+    # of your supported openab configurations reach services on other ports
+    # you MUST add a rule for them, otherwise enabling NetworkPolicy silently
+    # breaks that traffic. Common cases:
+    #
+    #   1. External (config-only) gateway — agents.<name>.gateway.deploy=false
+    #      with agents.<name>.gateway.url pointing at ws://openab-gateway:8080/ws
+    #      does NOT get the chart-managed agent→gateway port-8080 exception
+    #      (that only fires when gateway.deploy is true). Add:
+    #
+    #        extraRules:
+    #          - to:
+    #              - namespaceSelector:
+    #                  matchLabels:
+    #                    kubernetes.io/metadata.name: gateway-ns
+    #                podSelector:
+    #                  matchLabels:
+    #                    app: openab-gateway
+    #            ports:
+    #              - protocol: TCP
+    #                port: 8080
+    #
+    #   2. Self-hosted STT on a non-standard port (e.g. http://192.168.1.100:8080/v1)
+    #      — add an ipBlock + port entry (see docs/stt.md for hostname/CIDR examples).
+    #
+    #   3. Internal LLM proxy on a custom port (e.g. LiteLLM on 4000) — same shape.
     extraRules: []
 
 agents:

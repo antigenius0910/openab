@@ -9,11 +9,16 @@ description = "Native Rust coding agent with built-in ACP support"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# `system-proxy` re-enables HTTPS_PROXY / HTTP_PROXY / NO_PROXY env-var auto-detection
+# (default reqwest feature disabled by `default-features = false`). Lets operators route
+# the native agent's LLM API calls (Anthropic / OpenAI / Bedrock-over-reqwest / etc.)
+# and other reqwest HTTP calls through an HTTP CONNECT proxy by setting the env vars.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "system-proxy"] }
 # rmcp 1.7 is on reqwest 0.13; its `StreamableHttpClient`/`AuthClient` impls are
 # for the 0.13 `Client`, so the OAuth transport must hold that type. The rest of
-# the crate stays on 0.12.
-reqwest013 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+# the crate stays on 0.12. `system-proxy` re-enabled for the same reason as above so
+# the OAuth transport also honors proxy env vars.
+reqwest013 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "json", "stream", "system-proxy"] }
 anyhow = "1"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }

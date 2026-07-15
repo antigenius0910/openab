@@ -271,6 +271,51 @@ tests:
               - protocol: TCP
                 port: 443
 
+  - it: documented extraRules recipe for external-gateway TCP 8080 renders when gateway.deploy=false (round-6 F1)
+    template: templates/networkpolicy.yaml
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.extraRules:
+        - to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: gateway-ns
+              podSelector:
+                matchLabels:
+                  app: openab-gateway
+          ports:
+            - protocol: TCP
+              port: 8080
+      agents.kiro.gateway.enabled: true
+      agents.kiro.gateway.deploy: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: gateway-ns
+                podSelector:
+                  matchLabels:
+                    app: openab-gateway
+            ports:
+              - protocol: TCP
+                port: 8080
+      # No chart-managed agent→gateway rule (gateway.deploy=false)
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: openab
+                    app.kubernetes.io/instance: RELEASE-NAME
+                    app.kubernetes.io/component: kiro-gateway
+          any: true
+
   - it: uses configurable metadataExclusions for both IPv4 and IPv6 in the HTTPS rule
     template: templates/networkpolicy.yaml
     set:
