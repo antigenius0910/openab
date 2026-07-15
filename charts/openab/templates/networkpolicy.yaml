@@ -1,7 +1,10 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $np := .Values.networkPolicy }}
-{{/* ---------- F1: mode and proxy-required-fields validation ---------- */}}
-{{- $mode := $np.egress.mode | default "direct" }}
+{{/* ---------- mode and proxy-required-fields validation ---------- */}}
+{{/* F2: validate the raw value — do NOT default here. values.yaml already
+       supplies a default; treating an explicitly empty string as `direct`
+       silently bypasses the fail-closed contract. */}}
+{{- $mode := $np.egress.mode }}
 {{- if not (or (eq $mode "direct") (eq $mode "proxy")) }}
 {{- fail (printf "networkPolicy.egress.mode must be exactly \"direct\" or \"proxy\" (got %q)" $mode) }}
 {{- end }}
@@ -11,6 +14,28 @@
 {{- end }}
 {{- if not $np.egress.proxy.ports }}
 {{- fail "networkPolicy.egress.mode=proxy requires networkPolicy.egress.proxy.ports to be non-empty (an empty ports list authorizes every port)" }}
+{{- end }}
+{{/* F3: every proxy port entry must specify `port`. In a NetworkPolicyPort,
+       omitting `port` matches all ports for the given protocol, silently
+       broadening egress to the proxy pods beyond the intended target. */}}
+{{- range $i, $p := $np.egress.proxy.ports }}
+{{- if not $p.port }}
+{{- fail (printf "networkPolicy.egress.mode=proxy requires every networkPolicy.egress.proxy.ports entry to specify port (entry index %d missing port — omitted port matches ALL ports for the given protocol)" $i) }}
+{{- end }}
+{{- end }}
+{{/* F1: Feishu WebSocket mode is incompatible with proxy-only egress —
+       tokio_tungstenite::connect_async opens WSS directly and does not
+       consume HTTP CONNECT proxy configuration. Fail render early with a
+       clear pointer to the webhook fallback. */}}
+{{- range $name, $cfg := .Values.agents }}
+{{- if ne (include "openab.agentEnabled" $cfg) "false" }}
+{{- if and (($cfg.gateway).enabled) (($cfg.gateway).feishu).appId }}
+{{- $feishuMode := (($cfg.gateway).feishu).connectionMode | default "websocket" }}
+{{- if eq $feishuMode "websocket" }}
+{{- fail (printf "networkPolicy.egress.mode=proxy is incompatible with Feishu WebSocket mode for agent %q: the WSS event connection opens TCP 443 directly via tokio_tungstenite and does not honor HTTP CONNECT proxies. Set agents.%s.gateway.feishu.connectionMode=\"webhook\", or disable networkPolicy for this release." $name $name) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- range $name, $cfg := .Values.agents }}

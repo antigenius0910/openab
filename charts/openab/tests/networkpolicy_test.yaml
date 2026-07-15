@@ -448,6 +448,62 @@ tests:
                 name: proxy-credentials
         documentIndex: 0
 
+  # ── Round-4 review fixes: fail-closed validation gaps ──────────────────
+
+  - it: fails rendering when egress.mode is an explicitly empty string (round-4 F2)
+    template: templates/networkpolicy.yaml
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: 'networkPolicy.egress.mode must be exactly "direct" or "proxy" (got "")'
+
+  - it: fails rendering when any proxy.ports entry omits `port` (round-4 F3)
+    template: templates/networkpolicy.yaml
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: proxy
+      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
+      networkPolicy.egress.proxy.ports:
+        - protocol: TCP
+    asserts:
+      - failedTemplate:
+          errorMessage: 'networkPolicy.egress.mode=proxy requires every networkPolicy.egress.proxy.ports entry to specify port (entry index 0 missing port — omitted port matches ALL ports for the given protocol)'
+
+  - it: fails rendering when proxy mode is combined with Feishu WebSocket mode (round-4 F1)
+    template: templates/networkpolicy.yaml
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: proxy
+      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
+      networkPolicy.egress.proxy.ports:
+        - protocol: TCP
+          port: 3128
+      agents.kiro.gateway.enabled: true
+      agents.kiro.gateway.feishu.appId: cli_test
+      agents.kiro.gateway.feishu.appSecret: secret
+    asserts:
+      - failedTemplate:
+          errorMessage: 'networkPolicy.egress.mode=proxy is incompatible with Feishu WebSocket mode for agent "kiro": the WSS event connection opens TCP 443 directly via tokio_tungstenite and does not honor HTTP CONNECT proxies. Set agents.kiro.gateway.feishu.connectionMode="webhook", or disable networkPolicy for this release.'
+
+  - it: renders successfully when proxy mode is combined with Feishu WEBHOOK mode (round-4 F1 positive case)
+    template: templates/networkpolicy.yaml
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.mode: proxy
+      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
+      networkPolicy.egress.proxy.ports:
+        - protocol: TCP
+          port: 3128
+      agents.kiro.gateway.enabled: true
+      agents.kiro.gateway.feishu.appId: cli_test
+      agents.kiro.gateway.feishu.appSecret: secret
+      agents.kiro.gateway.feishu.connectionMode: webhook
+    asserts:
+      - hasDocuments:
+          count: 2
+
   - it: uses configurable metadataExclusions for both IPv4 and IPv6 in direct-mode HTTPS rule (round-2 F2)
     template: templates/networkpolicy.yaml
     set:
