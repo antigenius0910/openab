@@ -138,11 +138,20 @@ networkPolicy:
     # breaks that traffic. Common cases:
     #
     #   1. External (config-only) gateway — agents.<name>.gateway.deploy=false
-    #      with agents.<name>.gateway.url pointing at ws://openab-gateway:8080/ws
-    #      does NOT get the chart-managed agent→gateway port-8080 exception
-    #      (that only fires when gateway.deploy is true). Add:
+    #      does NOT get the chart-managed agent→gateway TCP 8080 exception
+    #      (that only fires when gateway.deploy is true). Since chart v0.10 the
+    #      gateway URL must be supplied via configToml (or configUrl) — the
+    #      standalone gateway.url value is no longer consumed by the ConfigMap.
+    #      Complete recipe (agent-side values):
     #
-    #        extraRules:
+    #        agents.<name>.gateway.enabled: true
+    #        agents.<name>.gateway.deploy: false
+    #        agents.<name>.configToml: |
+    #          [gateway]
+    #          url = "ws://openab-gateway.gateway-ns.svc:8080/ws"
+    #          platform = "telegram"
+    #          allow_all_channels = true
+    #        networkPolicy.egress.extraRules:
     #          - to:
     #              - namespaceSelector:
     #                  matchLabels:

@@ -1,0 +1,94 @@
+suite: NetworkPolicy — external-gateway recipe full-chart guard (round-7 F2)
+# This suite renders the ConfigMap AND NetworkPolicy together for the
+# documented external-gateway extraRules recipe (chart README + values.yaml).
+# It exists to catch config-schema migrations (e.g. the v0.10 configToml
+# requirement) that would silently invalidate the recipe if the two
+# templates were tested in isolation.
+templates:
+  - templates/configmap.yaml
+  - templates/networkpolicy.yaml
+
+tests:
+  - it: ConfigMap accepts the recipe's configToml containing a [gateway] section
+    template: templates/configmap.yaml
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.extraRules:
+        - to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: gateway-ns
+              podSelector:
+                matchLabels:
+                  app: openab-gateway
+          ports:
+            - protocol: TCP
+              port: 8080
+      agents.kiro.gateway.enabled: true
+      agents.kiro.gateway.deploy: false
+      agents.kiro.configToml: |
+        [gateway]
+        url = "ws://openab-gateway.gateway-ns.svc:8080/ws"
+        platform = "telegram"
+        allow_all_channels = true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ConfigMap
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'url = "ws://openab-gateway\.gateway-ns\.svc:8080/ws"'
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'platform = "telegram"'
+
+  - it: NetworkPolicy renders the recipe's extraRules TCP 8080 entry and does NOT emit a chart-managed agent→gateway rule (gateway.deploy=false)
+    template: templates/networkpolicy.yaml
+    set:
+      networkPolicy.enabled: true
+      networkPolicy.egress.extraRules:
+        - to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: gateway-ns
+              podSelector:
+                matchLabels:
+                  app: openab-gateway
+          ports:
+            - protocol: TCP
+              port: 8080
+      agents.kiro.gateway.enabled: true
+      agents.kiro.gateway.deploy: false
+      agents.kiro.configToml: |
+        [gateway]
+        url = "ws://openab-gateway.gateway-ns.svc:8080/ws"
+        platform = "telegram"
+        allow_all_channels = true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: gateway-ns
+                podSelector:
+                  matchLabels:
+                    app: openab-gateway
+            ports:
+              - protocol: TCP
+                port: 8080
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: openab
+                    app.kubernetes.io/instance: RELEASE-NAME
+                    app.kubernetes.io/component: kiro-gateway
+          any: true

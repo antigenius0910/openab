@@ -218,9 +218,12 @@ spec:
               value: {{ ($cfg.gateway).wecom.debounceSecs | quote }}
             {{- end }}
             {{- end }}
+            {{- $gwEnv := ($cfg.gateway).env | default dict }}
+            {{- if not (hasKey $gwEnv "RUST_LOG") }}
             - name: RUST_LOG
               value: {{ ($cfg.gateway).rustLog | default "info" | quote }}
-            {{- range $k, $v := ($cfg.gateway).env }}
+            {{- end }}
+            {{- range $k, $v := $gwEnv }}
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}

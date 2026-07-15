@@ -271,7 +271,13 @@ tests:
               - protocol: TCP
                 port: 443
 
-  - it: documented extraRules recipe for external-gateway TCP 8080 renders when gateway.deploy=false (round-6 F1)
+  # Round-7 F2: full-chart render for the external-gateway recipe — ensures
+  # both the ConfigMap (configToml with [gateway] section) AND the
+  # NetworkPolicy (extraRules for TCP 8080) render successfully together.
+  # A future config-schema migration that breaks the recipe would fail these
+  # two tests instead of silently invalidating documented guidance.
+
+  - it: external-gateway recipe — NetworkPolicy renders the extraRules TCP 8080 entry and does NOT emit a chart-managed agent→gateway rule (round-6 F1 + round-7 F2)
     template: templates/networkpolicy.yaml
     set:
       networkPolicy.enabled: true
@@ -288,6 +294,11 @@ tests:
               port: 8080
       agents.kiro.gateway.enabled: true
       agents.kiro.gateway.deploy: false
+      agents.kiro.configToml: |
+        [gateway]
+        url = "ws://openab-gateway.gateway-ns.svc:8080/ws"
+        platform = "telegram"
+        allow_all_channels = true
     asserts:
       - hasDocuments:
           count: 1
@@ -304,7 +315,6 @@ tests:
             ports:
               - protocol: TCP
                 port: 8080
-      # No chart-managed agent→gateway rule (gateway.deploy=false)
       - notContains:
           path: spec.egress
           content:
@@ -345,7 +355,7 @@ tests:
 
   # ── Gateway env / envFrom (general-purpose env injection) ─────────────────
 
-  - it: renders gateway.env into the gateway Deployment
+  - it: renders gateway.env into the gateway Deployment; user-supplied RUST_LOG wins over built-in and appears exactly once (round-7 F1)
     template: templates/gateway.yaml
     set:
       agents.kiro.gateway.enabled: true
@@ -358,6 +368,33 @@ tests:
           content:
             name: MY_FLAG
             value: "on"
+        documentIndex: 0
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RUST_LOG
+            value: "openab_gateway=debug"
+        documentIndex: 0
+      # RUST_LOG must appear exactly once — no built-in duplicate
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RUST_LOG
+            value: "info"
+        documentIndex: 0
+
+  - it: emits built-in RUST_LOG when gateway.env does NOT override it (round-7 F1 default path)
+    template: templates/gateway.yaml
+    set:
+      agents.kiro.gateway.enabled: true
+      agents.kiro.gateway.env:
+        MY_FLAG: "on"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RUST_LOG
+            value: "info"
         documentIndex: 0
 
   - it: renders gateway.envFrom on the gateway Deployment
