@@ -22,11 +22,11 @@ agents:
 
 ### `full` (default)
 
-Shows each tool call with its complete title. When more than 3 tools finish, they collapse into a count summary automatically.
+Shows each tool call with its complete title. Consecutive repeats of the same tool are collapsed into a single line with an `(×N)` suffix, so a burst like three back-to-back `ToolSearch` calls renders as one line — not three. When more than 3 **distinct** tool groups finish or are still running mid-stream, individual lines collapse into a raw-count summary (`✅ 5 · ❌ 1 tool(s) completed` / `🔧 4 more running` + the trailing few).
 
 ```
 ✅ `curl -s "https://ghcr.io/v2/openabdev/charts/openab/tags/list"`
-✅ `grep -r "pattern" src/`
+✅ `grep -r "pattern" src/` (×2)
 🔧 `npm install`...
 
 Agent response text here...

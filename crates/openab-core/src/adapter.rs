@@ -1403,9 +1403,14 @@ impl ToolEntry {
 
 /// Maximum number of **post-grouping** finished/running lines to show
 /// individually during streaming before collapsing into a summary line.
-/// Compared against grouped-line count so that N identical repeats of a
-/// single tool (which collapse to one `(×N)` line) always render as that
-/// line, never as a generic "N tool(s) completed" fallback.
+///
+/// Gates both the streaming finished-branch and the streaming
+/// running-branch, and is compared against grouped-line count (a run of
+/// N identical repeats counts as ONE line, not N). Once the grouped-line
+/// count itself exceeds this threshold the fallback path still fires —
+/// the finished branch shows the raw-count summary `✅ N tool(s) completed`
+/// and the running branch shows `🔧 N more running` + the trailing few
+/// visible groups.
 const TOOL_COLLAPSE_THRESHOLD: usize = 3;
 
 /// Collapse a sequence of tool entries into one entry per **consecutive** run
@@ -1430,7 +1435,7 @@ fn group_entries<'a>(
 
 /// Render one grouped entry. Repeats append ` (×N)`; for `Running` the count
 /// sits BEFORE the trailing `...` so the string reads
-/// `🔧 \`curl\` (×3)...` instead of `🔧 \`curl\`... (×3)`.
+/// ``🔧 `curl` (×3)...`` instead of ``🔧 `curl`... (×3)``.
 fn render_group(title: &str, state: ToolState, count: usize) -> String {
     let base = ToolEntry {
         id: String::new(),
@@ -1522,9 +1527,12 @@ fn compose_display(
                     .collect();
 
                 if streaming {
-                    // Threshold on GROUPED-line count, not raw entries — so
-                    // 4× the same tool renders as `✅ X (×4)`, never as the
-                    // generic "4 tool(s) completed" fallback.
+                    // Threshold on GROUPED-line count, not raw entries: N
+                    // repeats of a single tool count as 1, so 4× the same
+                    // tool renders as `✅ X (×4)`. The `>THRESHOLD` fallback
+                    // still fires once the number of distinct groups itself
+                    // exceeds the threshold — that summary reports raw call
+                    // counts (`✅ N · ❌ M tool(s) completed`).
                     if finished_groups.len() <= TOOL_COLLAPSE_THRESHOLD {
                         for (t, s, n) in &finished_groups {
                             out.push_str(&render_group(t, *s, *n));
@@ -1547,9 +1555,20 @@ fn compose_display(
                             out.push('\n');
                         }
                     } else {
-                        let hidden = running_groups.len() - TOOL_COLLAPSE_THRESHOLD;
-                        out.push_str(&format!("🔧 {hidden} more running\n"));
-                        for (t, s, n) in running_groups.iter().skip(hidden) {
+                        // Index by group boundary (never split a run) but
+                        // report the summary in tool-call units so the number
+                        // matches the sibling finished-fallback summary and
+                        // the pre-PR raw-count behaviour that users are used
+                        // to. A hidden group of `a×2` contributes 2, not 1.
+                        let hidden_groups =
+                            running_groups.len() - TOOL_COLLAPSE_THRESHOLD;
+                        let hidden_calls: usize = running_groups
+                            .iter()
+                            .take(hidden_groups)
+                            .map(|(_, _, n)| *n)
+                            .sum();
+                        out.push_str(&format!("🔧 {hidden_calls} more running\n"));
+                        for (t, s, n) in running_groups.iter().skip(hidden_groups) {
                             out.push_str(&render_group(t, *s, *n));
                             out.push('\n');
                         }
@@ -2076,31 +2095,137 @@ mod tests {
     }
 
     #[test]
-    fn compose_display_full_streaming_running_hidden_summary_uses_group_index() {
-        // >TOOL_COLLAPSE_THRESHOLD DISTINCT running groups triggers the
-        // "N more running" tail; the summary counts groups (not raw entries)
-        // and the visible tail preserves group boundaries. Regression test
-        // for the reviewer's finding that skipping by raw index could split
-        // a duplicate run across the hidden/visible boundary.
+    fn compose_display_full_streaming_running_hidden_count_is_tool_calls_not_groups() {
+        // Fixture: 7 running entries in 5 groups — a(×2), b(×2), c, d, e.
+        // At `TOOL_COLLAPSE_THRESHOLD = 3`, hidden_groups = 2 (`a` + `b`),
+        // representing 4 tool calls. The summary must say "4 more running",
+        // matching the raw-count units used by the sibling finished-branch
+        // fallback and the pre-PR behaviour. Regression test for reviewer
+        // finding F1: previously the summary reported hidden group count.
         let tools = vec![
             tool("1", "a", ToolState::Running),
-            tool("2", "a", ToolState::Running), // grouped with #1
+            tool("2", "a", ToolState::Running),
+            tool("3", "b", ToolState::Running),
+            tool("4", "b", ToolState::Running),
+            tool("5", "c", ToolState::Running),
+            tool("6", "d", ToolState::Running),
+            tool("7", "e", ToolState::Running),
+        ];
+        let out = compose_display(&tools, "", true, ToolDisplay::Full);
+        assert!(
+            out.contains("🔧 4 more running"),
+            "hidden summary must count tool calls: {out}"
+        );
+        assert!(
+            !out.contains("🔧 2 more running"),
+            "must not report hidden group count: {out}"
+        );
+        // Visible tail = last THRESHOLD groups = c, d, e (each ×1).
+        // Neither hidden group (a, b) should appear in the visible tail.
+        assert!(!out.contains("`a`"), "`a` should be hidden: {out}");
+        assert!(!out.contains("`b`"), "`b` should be hidden: {out}");
+        assert!(out.contains("🔧 `c`..."), "output: {out}");
+        assert!(out.contains("🔧 `d`..."), "output: {out}");
+        assert!(out.contains("🔧 `e`..."), "output: {out}");
+    }
+
+    #[test]
+    fn compose_display_full_streaming_hidden_boundary_preserves_group() {
+        // Fixture per reviewer F2: `[a, b, b, c, d]` — 5 entries, 4 groups.
+        // With correct group-boundary skipping, `a` is hidden and the
+        // visible tail is `b(×2), c, d`. A regression to raw-entry skipping
+        // would hide `[a, b]` (leaving a bare `b, c, d` and losing the
+        // `(×2)` collapse). Pinning the exact strings catches both the raw
+        // vs group indexing bug AND F1 (hidden count in tool-call units:
+        // 1 group hidden = 1 tool hidden).
+        let tools = vec![
+            tool("1", "a", ToolState::Running),
+            tool("2", "b", ToolState::Running),
             tool("3", "b", ToolState::Running),
             tool("4", "c", ToolState::Running),
             tool("5", "d", ToolState::Running),
-            tool("6", "e", ToolState::Running),
         ];
-        // 5 distinct groups → 2 hidden, 3 visible (b/c/d skipped, then
-        // c/d/e? actually skip 2 = c, d, e visible). The important assertion
-        // is that duplicates never straddle the visible/hidden boundary.
         let out = compose_display(&tools, "", true, ToolDisplay::Full);
-        assert!(out.contains("more running"), "expected tail summary: {out}");
-        // `a` was grouped, so it either appears as one `(×2)` line or is
-        // wholly in the summary — never split.
-        let a_lines = out.matches("`a`").count();
         assert!(
-            a_lines == 0 || a_lines == 1,
-            "grouped `a` must not be split across summary/visible: {out}"
+            out.contains("🔧 1 more running"),
+            "expected exact hidden count 1: {out}"
+        );
+        assert!(
+            out.contains("🔧 `b` (×2)..."),
+            "grouped `b (×2)` must survive in visible tail: {out}"
+        );
+        assert_eq!(
+            out.matches("`b`").count(),
+            1,
+            "must not split the grouped `b` run across boundary: {out}"
+        );
+        assert!(out.contains("🔧 `c`..."), "output: {out}");
+        assert!(out.contains("🔧 `d`..."), "output: {out}");
+        assert!(!out.contains("`a`"), "`a` should be hidden: {out}");
+    }
+
+    #[test]
+    fn compose_display_full_streaming_finished_fallback_reports_raw_counts() {
+        // >TOOL_COLLAPSE_THRESHOLD distinct FINISHED groups triggers the
+        // fallback branch that was previously untested (reviewer F5). The
+        // summary must report raw call counts (deliberately different units
+        // from the group-count threshold gate above it): `a(×2) + b + c + d`
+        // = 5 successes, plus a failed `e` = 1 failure. String is exactly
+        // "✅ 5 · ❌ 1 tool(s) completed".
+        let tools = vec![
+            tool("1", "a", ToolState::Completed),
+            tool("2", "a", ToolState::Completed),
+            tool("3", "b", ToolState::Completed),
+            tool("4", "c", ToolState::Completed),
+            tool("5", "d", ToolState::Completed),
+            tool("6", "e", ToolState::Failed),
+        ];
+        let out = compose_display(&tools, "answer", true, ToolDisplay::Full);
+        assert!(
+            out.contains("✅ 5 · ❌ 1 tool(s) completed"),
+            "expected raw-count fallback summary: {out}"
+        );
+        // Individual lines must NOT appear (we're in the fallback branch).
+        assert!(!out.contains("`a`"), "individual lines suppressed: {out}");
+        assert!(!out.contains("(×2)"), "grouped line suppressed: {out}");
+    }
+
+    #[test]
+    fn compose_display_full_streaming_finished_at_threshold_shows_lines() {
+        // Boundary: EXACTLY `TOOL_COLLAPSE_THRESHOLD` distinct groups still
+        // renders individual lines (gate uses `<=`). Companion to the >3
+        // fallback test above — together they pin the boundary against a
+        // silent `<=` → `<` regression. Reviewer F4.
+        let tools = vec![
+            tool("1", "a", ToolState::Completed),
+            tool("2", "b", ToolState::Completed),
+            tool("3", "c", ToolState::Completed),
+        ];
+        let out = compose_display(&tools, "answer", true, ToolDisplay::Full);
+        assert!(out.contains("✅ `a`"), "output: {out}");
+        assert!(out.contains("✅ `b`"), "output: {out}");
+        assert!(out.contains("✅ `c`"), "output: {out}");
+        assert!(
+            !out.contains("tool(s) completed"),
+            "must not fall through to summary at threshold: {out}"
+        );
+    }
+
+    #[test]
+    fn compose_display_full_streaming_running_at_threshold_shows_lines() {
+        // Same boundary check for the running branch.
+        let tools = vec![
+            tool("1", "a", ToolState::Running),
+            tool("2", "b", ToolState::Running),
+            tool("3", "c", ToolState::Running),
+        ];
+        let out = compose_display(&tools, "", true, ToolDisplay::Full);
+        assert!(out.contains("🔧 `a`..."), "output: {out}");
+        assert!(out.contains("🔧 `b`..."), "output: {out}");
+        assert!(out.contains("🔧 `c`..."), "output: {out}");
+        assert!(
+            !out.contains("more running"),
+            "must not fall through to summary at threshold: {out}"
         );
     }
 
