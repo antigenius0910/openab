@@ -67,17 +67,18 @@ networkPolicy:
     extraRules: []
 
   egress:
-    # Egress topology. Must be exactly "direct" or "proxy" — invalid values
-    # fail the render (fail-closed).
-    # - direct: allow DNS + HTTPS (and optionally HTTP) to the open internet
-    #   with cloud metadata (169.254.169.254 / fd00:ec2::254) excluded.
-    #   Hobbyist / dev-cluster / small-team path.
-    # - proxy: allow DNS + egress restricted to a designated proxy Service.
-    #   Enterprise path per OpenSHELL prior art. See "proxy contract" note below.
-    mode: direct
+    # ⚠️ Egress topology is DIRECT only for now.
+    # Proxy-mode egress (routing all traffic through an operator-supplied
+    # HTTP CONNECT proxy — the OpenSHELL / Squid / Envoy pattern) was
+    # explored in early rounds of RFC #1394 but requires a proxy-aware
+    # networking refactor across openab-core / openab-gateway (see
+    # docs/openshell.md). Discord, Slack Socket Mode, external gateway,
+    # and Feishu default connections all bypass reqwest and open WSS
+    # directly — they cannot be authorized through HTTP CONNECT today.
+    # The chart therefore only ships direct egress. A follow-up RFC will
+    # cover proxy egress once the Rust networking refactor lands.
 
     # Allow DNS egress on UDP/TCP 53 to pods labelled k8s-app=kube-dns.
-    # Applies in both direct and proxy modes.
     allowDns: true
     # Trusted namespace hosting the DNS pods. Default "kube-system" matches
     # kubeadm/CoreDNS/kube-dns defaults and prevents a co-tenant from labelling
@@ -86,21 +87,20 @@ networkPolicy:
     # your DNS runs outside kube-system, or set to your DNS namespace directly.
     dnsNamespace: "kube-system"
 
-    # ── mode: direct ────────────────────────────────────────────────────────
     # Allow HTTPS (TCP 443). Excludes cloud metadata (see metadataExclusions
     # below) — blocks a common IAM-credential-theft path from a compromised
-    # agent pod. Ignored when mode=proxy.
+    # agent pod.
     allowHttps: true
     # Allow HTTP (TCP 80) with the same metadata exclusion. Off by default.
     # ⚠️ Enable if any of these fetch over HTTP: `agents.<name>.configUrl`,
     # lifecycle hooks that download over HTTP (see docs/hooks.md), or STT
-    # base URLs on HTTP. Prefer HTTPS wherever possible. Ignored when mode=proxy.
+    # base URLs on HTTP. Prefer HTTPS wherever possible.
     allowHttp: false
     # Add ::/0 to HTTPS/HTTP rules alongside 0.0.0.0/0 for IPv6 egress.
     # Turn off on IPv4-only clusters if you prefer explicit denial to
-    # allowing unused v6 ranges. Ignored when mode=proxy.
+    # allowing unused v6 ranges.
     allowIpv6: true
-    # Cloud metadata CIDRs excluded from the direct-mode HTTPS/HTTP rules.
+    # Cloud metadata CIDRs excluded from the HTTPS/HTTP rules.
     # NetworkPolicy allow rules combine additively — you CANNOT add another
     # exclusion via extraRules; you must edit these lists directly (or set
     # allowHttps=false + supply a complete replacement rule via extraRules).
@@ -127,66 +127,6 @@ networkPolicy:
         - 169.254.169.254/32
       ipv6:
         - fd00:ec2::254/128
-
-    # ── mode: proxy ─────────────────────────────────────────────────────────
-    # ⚠️ Proxy-mode CONTRACT
-    # NetworkPolicy only ENFORCES the destination allowlist. It does NOT
-    # redirect traffic through the proxy. You must configure BOTH the agent
-    # AND the chart-managed gateway (if deployed) to route their outbound
-    # traffic through the proxy — otherwise the NetworkPolicy deny will
-    # break platform API calls (Telegram replies, Teams OAuth, LLM APIs).
-    #
-    # 1. Agent — set proxy env vars via agents.<name>.env AND add them to
-    #    inherit_env in configToml so ACP children (claude-agent-acp,
-    #    kiro-cli, opencode, etc.) inherit them:
-    #
-    #      agents.<name>.env:
-    #        HTTPS_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
-    #        HTTP_PROXY:  "http://openshell.egress-proxy.svc.cluster.local:3128"
-    #        NO_PROXY:    ".svc,.cluster.local,10.0.0.0/8"
-    #
-    #      agents.<name>.configToml: |
-    #        [agent]
-    #        inherit_env = ["HTTPS_PROXY","HTTP_PROXY","NO_PROXY"]
-    #
-    # 2. Gateway — the gateway pod ALSO makes outbound HTTPS calls (Telegram
-    #    replies, Teams OAuth token exchange, Feishu/WeCom APIs, etc.). Set
-    #    the same env vars on it via the new agents.<name>.gateway.env field:
-    #
-    #      agents.<name>.gateway.env:
-    #        HTTPS_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
-    #        HTTP_PROXY:  "http://openshell.egress-proxy.svc.cluster.local:3128"
-    #        NO_PROXY:    ".svc,.cluster.local,10.0.0.0/8"
-    #
-    # Chart does NOT ship the proxy — deploy it separately (OpenSHELL,
-    # Squid, Envoy, mitmproxy, or anything speaking HTTP CONNECT).
-    #
-    # ⚠️ Feishu WebSocket mode is INCOMPATIBLE with proxy egress.
-    # The Feishu adapter opens its event stream via
-    # tokio_tungstenite::connect_async, which does NOT honor HTTP CONNECT
-    # proxy env vars — even with reqwest's system-proxy feature enabled on
-    # the gateway. In proxy mode, the WSS connection tries direct TCP 443
-    # to the Feishu endpoint and is blocked by the NetworkPolicy egress
-    # deny. Chart render will FAIL if any agent has gateway.feishu.appId
-    # set without gateway.feishu.connectionMode="webhook". Switch Feishu
-    # to webhook mode (or don't use proxy egress).
-    #
-    # egress.allowDns above still applies. allowHttps/allowHttp/allowIpv6 are
-    # IGNORED when mode=proxy.
-    #
-    # Rendering fails if any of these hold:
-    #   - egress.mode is not exactly "direct" or "proxy"
-    #   - egress.proxy.podSelector is empty
-    #   - egress.proxy.ports is empty
-    #   - any egress.proxy.ports entry omits `port` (would authorize ALL ports)
-    #   - Feishu WebSocket mode is configured on any agent (see above)
-    proxy:
-      # Namespace hosting the proxy pods. Empty = same namespace as the release.
-      namespace: ""
-      # Kubernetes label selector for the proxy pods.
-      podSelector: {}
-      # Ports on the proxy pods that agents should reach.
-      ports: []
 
     # extraRules: raw NetworkPolicyEgressRule entries appended verbatim.
     # Use to open extra ports or add cluster-specific carve-outs.
@@ -556,15 +496,10 @@ agents:
       strategy: "Recreate"  # Recreate (default, prevents concurrent WS conflicts) or RollingUpdate
       resources: {}     # e.g. { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 128Mi } }
       rustLog: "info"   # RUST_LOG for gateway container (e.g. "openab_gateway=debug")
-      # Additional environment variables for the gateway container.
-      # Useful for injecting HTTPS_PROXY / HTTP_PROXY / NO_PROXY when running
-      # under networkPolicy.egress.mode=proxy (the gateway also makes outbound
-      # HTTPS calls to platform APIs — Telegram replies, Teams OAuth, etc.).
-      # Example:
-      #   env:
-      #     HTTPS_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
-      #     HTTP_PROXY:  "http://openshell.egress-proxy.svc.cluster.local:3128"
-      #     NO_PROXY:    ".svc,.cluster.local,10.0.0.0/8"
+      # Additional environment variables for the gateway container (map,
+      # {name: value}). Same shape as agent-level `env`. Useful for feature
+      # flags, RUST_LOG overrides, HTTP proxy env vars if you're running the
+      # gateway behind a transparent proxy, etc.
       env: {}
       # Load additional env vars into the gateway from existing Secrets or ConfigMaps.
       # Same shape as agent-level `envFrom` (list of secretRef/configMapRef entries).

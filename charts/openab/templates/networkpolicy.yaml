@@ -1,47 +1,8 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $np := .Values.networkPolicy }}
-{{/* ---------- mode and proxy-required-fields validation ---------- */}}
-{{/* F2: validate the raw value — do NOT default here. values.yaml already
-       supplies a default; treating an explicitly empty string as `direct`
-       silently bypasses the fail-closed contract. */}}
-{{- $mode := $np.egress.mode }}
-{{- if not (or (eq $mode "direct") (eq $mode "proxy")) }}
-{{- fail (printf "networkPolicy.egress.mode must be exactly \"direct\" or \"proxy\" (got %q)" $mode) }}
-{{- end }}
-{{- if eq $mode "proxy" }}
-{{- if not (or $np.egress.proxy.podSelector.matchLabels $np.egress.proxy.podSelector.matchExpressions) }}
-{{- fail "networkPolicy.egress.mode=proxy requires networkPolicy.egress.proxy.podSelector.matchLabels or matchExpressions to be non-empty (an empty selector authorizes every pod in the namespace)" }}
-{{- end }}
-{{- if not $np.egress.proxy.ports }}
-{{- fail "networkPolicy.egress.mode=proxy requires networkPolicy.egress.proxy.ports to be non-empty (an empty ports list authorizes every port)" }}
-{{- end }}
-{{/* F3: every proxy port entry must specify `port`. In a NetworkPolicyPort,
-       omitting `port` matches all ports for the given protocol, silently
-       broadening egress to the proxy pods beyond the intended target. */}}
-{{- range $i, $p := $np.egress.proxy.ports }}
-{{- if not $p.port }}
-{{- fail (printf "networkPolicy.egress.mode=proxy requires every networkPolicy.egress.proxy.ports entry to specify port (entry index %d missing port — omitted port matches ALL ports for the given protocol)" $i) }}
-{{- end }}
-{{- end }}
-{{/* F1: Feishu WebSocket mode is incompatible with proxy-only egress —
-       tokio_tungstenite::connect_async opens WSS directly and does not
-       consume HTTP CONNECT proxy configuration. Fail render early with a
-       clear pointer to the webhook fallback. */}}
-{{- range $name, $cfg := .Values.agents }}
-{{- if ne (include "openab.agentEnabled" $cfg) "false" }}
-{{- if and (($cfg.gateway).enabled) (($cfg.gateway).feishu).appId }}
-{{- $feishuMode := (($cfg.gateway).feishu).connectionMode | default "websocket" }}
-{{- if eq $feishuMode "websocket" }}
-{{- fail (printf "networkPolicy.egress.mode=proxy is incompatible with Feishu WebSocket mode for agent %q: the WSS event connection opens TCP 443 directly via tokio_tungstenite and does not honor HTTP CONNECT proxies. Set agents.%s.gateway.feishu.connectionMode=\"webhook\", or disable networkPolicy for this release." $name $name) }}
-{{- end }}
-{{- end }}
-{{- end }}
-{{- end }}
-{{- end }}
 {{- range $name, $cfg := .Values.agents }}
 {{- if ne (include "openab.agentEnabled" $cfg) "false" }}
 {{- $d := dict "ctx" $ "agent" $name "cfg" $cfg }}
-{{/* F2: chart-managed gateway is deployed iff gateway.enabled AND gateway.deploy != false (matches templates/gateway.yaml) */}}
 {{- $gwDeployed := and (($cfg.gateway).enabled) (ne (($cfg.gateway).deploy | toString) "false") }}
 {{- $gwD := dict "ctx" $ "agent" (printf "%s-gateway" $name) "cfg" (omit $cfg "nameOverride") }}
 ---
@@ -76,7 +37,6 @@ spec:
           port: 8080
 {{- end }}
 {{- if $gwDeployed }}
-{{/* F3: use the same deploy check as templates/gateway.yaml — avoid orphan NPs */}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -110,7 +70,7 @@ spec:
 {{- define "openab.networkPolicyEgress" -}}
 {{- $np := .np -}}
 {{- if $np.egress.allowDns -}}
-{{/* F4: default DNS destination scoped to a trusted namespace (usually kube-system).
+{{/* Default DNS destination scoped to a trusted namespace (usually kube-system).
        Empty dnsNamespace preserves the legacy any-namespace behaviour for exotic DNS setups. */}}
 - to:
 {{- if $np.egress.dnsNamespace }}
@@ -132,22 +92,6 @@ spec:
     - protocol: TCP
       port: 53
 {{- end }}
-{{- if eq ($np.egress.mode | default "direct") "proxy" }}
-- to:
-{{- if $np.egress.proxy.namespace }}
-{{/* F7: quote the namespace value — bare all-numeric namespace names YAML-parse as int */}}
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: {{ $np.egress.proxy.namespace | quote }}
-      podSelector:
-        {{- toYaml $np.egress.proxy.podSelector | nindent 8 }}
-{{- else }}
-    - podSelector:
-        {{- toYaml $np.egress.proxy.podSelector | nindent 8 }}
-{{- end }}
-  ports:
-    {{- toYaml $np.egress.proxy.ports | nindent 4 }}
-{{- else }}
 {{- $mdxV4 := $np.egress.metadataExclusions.ipv4 | default (list "169.254.169.254/32") }}
 {{- $mdxV6 := $np.egress.metadataExclusions.ipv6 | default (list "fd00:ec2::254/128") }}
 {{- if $np.egress.allowHttps }}
@@ -157,9 +101,6 @@ spec:
         except:
           {{- toYaml $mdxV4 | nindent 10 }}
 {{- if $np.egress.allowIpv6 }}
-{{/* F8/F2: IPv6 exclusions configurable via metadataExclusions.ipv6 —
-       additive NetworkPolicy semantics mean extraRules cannot subtract
-       from an existing allow. */}}
     - ipBlock:
         cidr: ::/0
         except:
@@ -184,7 +125,6 @@ spec:
   ports:
     - protocol: TCP
       port: 80
-{{- end }}
 {{- end }}
 {{- with $np.egress.extraRules }}
 {{ toYaml . }}

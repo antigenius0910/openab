@@ -1,4 +1,4 @@
-suite: NetworkPolicy support (opt-in, direct + proxy egress modes)
+suite: NetworkPolicy support (opt-in, direct egress only)
 templates:
   - templates/networkpolicy.yaml
   - templates/gateway.yaml
@@ -10,7 +10,7 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: renders a single agent NetworkPolicy in direct mode (gateway off) with deny-all ingress, DNS scoped to kube-system, and IPv4+IPv6 HTTPS egress
+  - it: renders a single agent NetworkPolicy (gateway off) with deny-all ingress, DNS scoped to kube-system, and IPv4+IPv6 HTTPS egress
     template: templates/networkpolicy.yaml
     set:
       networkPolicy.enabled: true
@@ -63,7 +63,7 @@ tests:
               - protocol: TCP
                 port: 443
 
-  - it: renders both agent and gateway NetworkPolicies in direct mode when gateway is deployed, and the agent policy authorizes TCP 8080 to the gateway pod (F2)
+  - it: renders both agent and gateway NetworkPolicies when gateway is deployed, and the agent policy authorizes TCP 8080 to the gateway pod
     template: templates/networkpolicy.yaml
     set:
       networkPolicy.enabled: true
@@ -104,7 +104,7 @@ tests:
                 port: 8080
         documentIndex: 0
 
-  - it: does NOT render a gateway NetworkPolicy or an agent→gateway egress rule when gateway.enabled=true but gateway.deploy=false (F3 regression — matches templates/gateway.yaml condition)
+  - it: does NOT render a gateway NetworkPolicy or an agent→gateway egress rule when gateway.enabled=true but gateway.deploy=false (matches templates/gateway.yaml condition)
     template: templates/networkpolicy.yaml
     set:
       networkPolicy.enabled: true
@@ -130,7 +130,7 @@ tests:
                 port: 8080
           any: true
 
-  - it: renders HTTP egress rule (IPv4+IPv6) when egress.allowHttp is true (direct mode)
+  - it: renders HTTP egress rule (IPv4+IPv6) when egress.allowHttp is true
     template: templates/networkpolicy.yaml
     set:
       networkPolicy.enabled: true
@@ -152,7 +152,7 @@ tests:
               - protocol: TCP
                 port: 80
 
-  - it: omits IPv6 ipBlock when allowIpv6=false (direct mode, IPv4-only cluster) (F8)
+  - it: omits IPv6 ipBlock when allowIpv6=false (IPv4-only cluster)
     template: templates/networkpolicy.yaml
     set:
       networkPolicy.enabled: true
@@ -179,7 +179,7 @@ tests:
                     - fd00:ec2::254/128
           any: true
 
-  - it: falls back to any-namespace DNS when egress.dnsNamespace is empty string (F4 legacy escape hatch)
+  - it: falls back to any-namespace DNS when egress.dnsNamespace is empty string (legacy escape hatch)
     template: templates/networkpolicy.yaml
     set:
       networkPolicy.enabled: true
@@ -198,105 +198,6 @@ tests:
                 port: 53
               - protocol: TCP
                 port: 53
-
-  - it: restricts agent egress to the designated proxy Service in proxy mode (F5 — enforcement only)
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: proxy
-      networkPolicy.egress.proxy.namespace: egress-proxy
-      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
-      networkPolicy.egress.proxy.ports:
-        - protocol: TCP
-          port: 3128
-    asserts:
-      - contains:
-          path: spec.egress
-          content:
-            to:
-              - namespaceSelector:
-                  matchLabels:
-                    kubernetes.io/metadata.name: egress-proxy
-                podSelector:
-                  matchLabels:
-                    app: openshell
-            ports:
-              - protocol: TCP
-                port: 3128
-      - notContains:
-          path: spec.egress
-          content:
-            to:
-              - ipBlock:
-                  cidr: 0.0.0.0/0
-                  except:
-                    - 169.254.169.254/32
-              - ipBlock:
-                  cidr: ::/0
-                  except:
-                    - fd00:ec2::254/128
-            ports:
-              - protocol: TCP
-                port: 443
-          any: true
-
-  - it: quotes an all-numeric proxy namespace so it renders as a string, not a YAML integer (F7)
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: proxy
-      networkPolicy.egress.proxy.namespace: "1234"
-      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
-      networkPolicy.egress.proxy.ports:
-        - protocol: TCP
-          port: 3128
-    asserts:
-      - equal:
-          path: spec.egress[1].to[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "1234"
-
-  - it: applies proxy-mode egress to both agent and gateway policies when gateway is deployed
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: proxy
-      networkPolicy.egress.proxy.namespace: egress-proxy
-      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
-      networkPolicy.egress.proxy.ports:
-        - protocol: TCP
-          port: 3128
-      agents.kiro.gateway.enabled: true
-    asserts:
-      - hasDocuments:
-          count: 2
-      - contains:
-          path: spec.egress
-          content:
-            to:
-              - namespaceSelector:
-                  matchLabels:
-                    kubernetes.io/metadata.name: egress-proxy
-                podSelector:
-                  matchLabels:
-                    app: openshell
-            ports:
-              - protocol: TCP
-                port: 3128
-        documentIndex: 0
-      - contains:
-          path: spec.egress
-          content:
-            to:
-              - namespaceSelector:
-                  matchLabels:
-                    kubernetes.io/metadata.name: egress-proxy
-                podSelector:
-                  matchLabels:
-                    app: openshell
-            ports:
-              - protocol: TCP
-                port: 3128
-        documentIndex: 1
 
   - it: appends ingress.extraRules verbatim to the agent policy
     template: templates/networkpolicy.yaml
@@ -322,7 +223,7 @@ tests:
               - protocol: TCP
                 port: 9090
 
-  - it: locks egress down to only extraRules when allowDns and allowHttps are false (direct mode)
+  - it: locks egress down to only extraRules when allowDns and allowHttps are false
     template: templates/networkpolicy.yaml
     set:
       networkPolicy.enabled: true
@@ -370,141 +271,7 @@ tests:
               - protocol: TCP
                 port: 443
 
-  # ── F1 negative tests: fail-closed validation ─────────────────────────────
-
-  - it: fails rendering when egress.mode is not exactly "direct" or "proxy" (F1)
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: proxxy
-    asserts:
-      - failedTemplate:
-          errorMessage: 'networkPolicy.egress.mode must be exactly "direct" or "proxy" (got "proxxy")'
-
-  - it: fails rendering when mode=proxy but proxy.podSelector is empty (F1)
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: proxy
-      networkPolicy.egress.proxy.ports:
-        - protocol: TCP
-          port: 3128
-    asserts:
-      - failedTemplate:
-          errorMessage: 'networkPolicy.egress.mode=proxy requires networkPolicy.egress.proxy.podSelector.matchLabels or matchExpressions to be non-empty (an empty selector authorizes every pod in the namespace)'
-
-  - it: fails rendering when mode=proxy but proxy.ports is empty (F1)
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: proxy
-      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
-    asserts:
-      - failedTemplate:
-          errorMessage: 'networkPolicy.egress.mode=proxy requires networkPolicy.egress.proxy.ports to be non-empty (an empty ports list authorizes every port)'
-
-  # ── Round-2 review fixes ─────────────────────────────────────────────────
-
-  - it: injects gateway.env into the gateway Deployment so proxy-mode gateway can route outbound HTTPS through the proxy (round-2 F1)
-    template: templates/gateway.yaml
-    set:
-      agents.kiro.gateway.enabled: true
-      agents.kiro.gateway.env:
-        HTTPS_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
-        HTTP_PROXY: "http://openshell.egress-proxy.svc.cluster.local:3128"
-        NO_PROXY: ".svc,.cluster.local,10.0.0.0/8"
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: HTTPS_PROXY
-            value: "http://openshell.egress-proxy.svc.cluster.local:3128"
-        documentIndex: 0
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: HTTP_PROXY
-            value: "http://openshell.egress-proxy.svc.cluster.local:3128"
-        documentIndex: 0
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: NO_PROXY
-            value: ".svc,.cluster.local,10.0.0.0/8"
-        documentIndex: 0
-
-  - it: renders gateway.envFrom on the gateway Deployment (round-2 F1)
-    template: templates/gateway.yaml
-    set:
-      agents.kiro.gateway.enabled: true
-      agents.kiro.gateway.envFrom:
-        - secretRef:
-            name: proxy-credentials
-    asserts:
-      - equal:
-          path: spec.template.spec.containers[0].envFrom
-          value:
-            - secretRef:
-                name: proxy-credentials
-        documentIndex: 0
-
-  # ── Round-4 review fixes: fail-closed validation gaps ──────────────────
-
-  - it: fails rendering when egress.mode is an explicitly empty string (round-4 F2)
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: ""
-    asserts:
-      - failedTemplate:
-          errorMessage: 'networkPolicy.egress.mode must be exactly "direct" or "proxy" (got "")'
-
-  - it: fails rendering when any proxy.ports entry omits `port` (round-4 F3)
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: proxy
-      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
-      networkPolicy.egress.proxy.ports:
-        - protocol: TCP
-    asserts:
-      - failedTemplate:
-          errorMessage: 'networkPolicy.egress.mode=proxy requires every networkPolicy.egress.proxy.ports entry to specify port (entry index 0 missing port — omitted port matches ALL ports for the given protocol)'
-
-  - it: fails rendering when proxy mode is combined with Feishu WebSocket mode (round-4 F1)
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: proxy
-      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
-      networkPolicy.egress.proxy.ports:
-        - protocol: TCP
-          port: 3128
-      agents.kiro.gateway.enabled: true
-      agents.kiro.gateway.feishu.appId: cli_test
-      agents.kiro.gateway.feishu.appSecret: secret
-    asserts:
-      - failedTemplate:
-          errorMessage: 'networkPolicy.egress.mode=proxy is incompatible with Feishu WebSocket mode for agent "kiro": the WSS event connection opens TCP 443 directly via tokio_tungstenite and does not honor HTTP CONNECT proxies. Set agents.kiro.gateway.feishu.connectionMode="webhook", or disable networkPolicy for this release.'
-
-  - it: renders successfully when proxy mode is combined with Feishu WEBHOOK mode (round-4 F1 positive case)
-    template: templates/networkpolicy.yaml
-    set:
-      networkPolicy.enabled: true
-      networkPolicy.egress.mode: proxy
-      networkPolicy.egress.proxy.podSelector.matchLabels.app: openshell
-      networkPolicy.egress.proxy.ports:
-        - protocol: TCP
-          port: 3128
-      agents.kiro.gateway.enabled: true
-      agents.kiro.gateway.feishu.appId: cli_test
-      agents.kiro.gateway.feishu.appSecret: secret
-      agents.kiro.gateway.feishu.connectionMode: webhook
-    asserts:
-      - hasDocuments:
-          count: 2
-
-  - it: uses configurable metadataExclusions for both IPv4 and IPv6 in direct-mode HTTPS rule (round-2 F2)
+  - it: uses configurable metadataExclusions for both IPv4 and IPv6 in the HTTPS rule
     template: templates/networkpolicy.yaml
     set:
       networkPolicy.enabled: true
@@ -530,3 +297,35 @@ tests:
             ports:
               - protocol: TCP
                 port: 443
+
+  # ── Gateway env / envFrom (general-purpose env injection) ─────────────────
+
+  - it: renders gateway.env into the gateway Deployment
+    template: templates/gateway.yaml
+    set:
+      agents.kiro.gateway.enabled: true
+      agents.kiro.gateway.env:
+        MY_FLAG: "on"
+        RUST_LOG: "openab_gateway=debug"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MY_FLAG
+            value: "on"
+        documentIndex: 0
+
+  - it: renders gateway.envFrom on the gateway Deployment
+    template: templates/gateway.yaml
+    set:
+      agents.kiro.gateway.enabled: true
+      agents.kiro.gateway.envFrom:
+        - secretRef:
+            name: gateway-extras
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].envFrom
+          value:
+            - secretRef:
+                name: gateway-extras
+        documentIndex: 0
