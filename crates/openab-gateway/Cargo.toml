@@ -11,14 +11,7 @@ tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `system-proxy` re-enables HTTPS_PROXY / HTTP_PROXY / NO_PROXY env-var auto-detection
-# (default reqwest feature disabled by `default-features = false`). Lets operators route
-# reqwest-based gateway HTTP calls (Telegram/Teams/Feishu/WeCom/GoogleChat/LINE APIs)
-# through an HTTP CONNECT proxy by setting the env vars on the pod.
-# Note: WebSocket transports (Feishu WSS) use tokio_tungstenite directly and do NOT
-# honor these env vars — that requires the openab networking refactor tracked in
-# docs/openshell.md.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "system-proxy"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"

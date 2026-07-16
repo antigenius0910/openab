@@ -21,12 +21,7 @@ futures-util = "0.3"
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
-# `system-proxy` re-enables HTTPS_PROXY / HTTP_PROXY / NO_PROXY env-var auto-detection
-# (default reqwest feature disabled by `default-features = false`). Note: WebSocket
-# transports in this crate (Slack Socket Mode, external gateway WSS) use
-# tokio_tungstenite directly and do NOT honor these env vars — proxy-aware WSS
-# tunneling requires the openab networking refactor tracked in docs/openshell.md.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "blocking", "stream", "system-proxy"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "blocking", "stream"] }
 bytes = "1"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
