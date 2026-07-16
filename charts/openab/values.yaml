@@ -533,22 +533,6 @@ agents:
       strategy: "Recreate"  # Recreate (default, prevents concurrent WS conflicts) or RollingUpdate
       resources: {}     # e.g. { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 128Mi } }
       rustLog: "info"   # RUST_LOG for gateway container (e.g. "openab_gateway=debug")
-      # Additional environment variables for the gateway container (map,
-      # {name: value}). Same shape as agent-level `env`. Useful for feature
-      # flags, RUST_LOG overrides, HTTP proxy env vars if you're running the
-      # gateway behind a transparent proxy, etc.
-      #
-      # Collision policy: if a key here matches a chart-managed env name
-      # (RUST_LOG, GATEWAY_WS_TOKEN, TELEGRAM_*, LINE_*, TEAMS_*, FEISHU_*,
-      # GOOGLE_CHAT_*, WECOM_*), the built-in entry is omitted and only your
-      # value is rendered. Kubernetes uses `name` as the pod-env merge key, so
-      # emitting both would create merge-key ambiguity (can be rejected by
-      # server-side-apply / GitOps tooling). Prefer the structured field
-      # (gateway.telegram.botToken, gateway.rustLog, ...) when it exists.
-      env: {}
-      # Load additional env vars into the gateway from existing Secrets or ConfigMaps.
-      # Same shape as agent-level `envFrom` (list of secretRef/configMapRef entries).
-      envFrom: []
       nodeSelector: {}
       tolerations: []
       affinity: {}

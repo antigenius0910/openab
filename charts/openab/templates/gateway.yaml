@@ -45,16 +45,7 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
-            {{- /*
-              User-wins collision policy: if the operator supplies a chart-managed
-              env name via gateway.env (e.g. TELEGRAM_BOT_TOKEN), the built-in
-              entry is omitted so that only the user's value renders. Kubernetes
-              uses `name` as the merge key for pod env, so emitting both would
-              create merge-key ambiguity and can be rejected by server-side-apply.
-              Same policy that applies to RUST_LOG. See PR #1400.
-            */ -}}
-            {{- $gwEnv := ($cfg.gateway).env | default dict }}
-            {{- if and ($cfg.gateway).token (not (hasKey $gwEnv "GATEWAY_WS_TOKEN")) }}
+            {{- if ($cfg.gateway).token }}
             - name: GATEWAY_WS_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -62,34 +53,30 @@ spec:
                   key: gateway-ws-token
             {{- end }}
             {{- if $hasTelegram }}
-            {{- if not (hasKey $gwEnv "TELEGRAM_BOT_TOKEN") }}
             - name: TELEGRAM_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: telegram-bot-token
-            {{- end }}
-            {{- if and (($cfg.gateway).telegram).secretToken (not (hasKey $gwEnv "TELEGRAM_SECRET_TOKEN")) }}
+            {{- if (($cfg.gateway).telegram).secretToken }}
             - name: TELEGRAM_SECRET_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: telegram-secret-token
             {{- end }}
-            {{- if and (($cfg.gateway).telegram).webhookPath (not (hasKey $gwEnv "TELEGRAM_WEBHOOK_PATH")) }}
+            {{- if (($cfg.gateway).telegram).webhookPath }}
             - name: TELEGRAM_WEBHOOK_PATH
               value: {{ (($cfg.gateway).telegram).webhookPath | quote }}
             {{- end }}
             {{- end }}
             {{- if $hasLine }}
-            {{- if not (hasKey $gwEnv "LINE_CHANNEL_SECRET") }}
             - name: LINE_CHANNEL_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: line-channel-secret
-            {{- end }}
-            {{- if and (($cfg.gateway).line).channelAccessToken (not (hasKey $gwEnv "LINE_CHANNEL_ACCESS_TOKEN")) }}
+            {{- if (($cfg.gateway).line).channelAccessToken }}
             - name: LINE_CHANNEL_ACCESS_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -98,171 +85,141 @@ spec:
             {{- end }}
             {{- end }}
             {{- if $hasTeams }}
-            {{- if not (hasKey $gwEnv "TEAMS_APP_ID") }}
             - name: TEAMS_APP_ID
               value: {{ ($cfg.gateway).teams.appId | quote }}
-            {{- end }}
-            {{- if not (hasKey $gwEnv "TEAMS_APP_SECRET") }}
             - name: TEAMS_APP_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: teams-app-secret
-            {{- end }}
-            {{- if and ($cfg.gateway).teams.oauthEndpoint (not (hasKey $gwEnv "TEAMS_OAUTH_ENDPOINT")) }}
+            {{- if ($cfg.gateway).teams.oauthEndpoint }}
             - name: TEAMS_OAUTH_ENDPOINT
               value: {{ ($cfg.gateway).teams.oauthEndpoint | quote }}
             {{- end }}
-            {{- if and ($cfg.gateway).teams.openidMetadata (not (hasKey $gwEnv "TEAMS_OPENID_METADATA")) }}
+            {{- if ($cfg.gateway).teams.openidMetadata }}
             - name: TEAMS_OPENID_METADATA
               value: {{ ($cfg.gateway).teams.openidMetadata | quote }}
             {{- end }}
-            {{- if and ($cfg.gateway).teams.allowedTenants (not (hasKey $gwEnv "TEAMS_ALLOWED_TENANTS")) }}
+            {{- if ($cfg.gateway).teams.allowedTenants }}
             - name: TEAMS_ALLOWED_TENANTS
               value: {{ ($cfg.gateway).teams.allowedTenants | join "," | quote }}
             {{- end }}
-            {{- if and ($cfg.gateway).teams.webhookPath (not (hasKey $gwEnv "TEAMS_WEBHOOK_PATH")) }}
+            {{- if ($cfg.gateway).teams.webhookPath }}
             - name: TEAMS_WEBHOOK_PATH
               value: {{ ($cfg.gateway).teams.webhookPath | quote }}
             {{- end }}
             {{- end }}
             {{- $hasFeishu := and (($cfg.gateway).feishu).appId (($cfg.gateway).feishu).appSecret }}
             {{- if $hasFeishu }}
-            {{- if not (hasKey $gwEnv "FEISHU_APP_ID") }}
             - name: FEISHU_APP_ID
               value: {{ ($cfg.gateway).feishu.appId | quote }}
-            {{- end }}
-            {{- if not (hasKey $gwEnv "FEISHU_APP_SECRET") }}
             - name: FEISHU_APP_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: feishu-app-secret
-            {{- end }}
-            {{- if and ($cfg.gateway).feishu.domain (not (hasKey $gwEnv "FEISHU_DOMAIN")) }}
+            {{- if ($cfg.gateway).feishu.domain }}
             - name: FEISHU_DOMAIN
               value: {{ ($cfg.gateway).feishu.domain | quote }}
             {{- end }}
-            {{- if and ($cfg.gateway).feishu.connectionMode (not (hasKey $gwEnv "FEISHU_CONNECTION_MODE")) }}
+            {{- if ($cfg.gateway).feishu.connectionMode }}
             - name: FEISHU_CONNECTION_MODE
               value: {{ ($cfg.gateway).feishu.connectionMode | quote }}
             {{- end }}
-            {{- if and ($cfg.gateway).feishu.webhookPath (not (hasKey $gwEnv "FEISHU_WEBHOOK_PATH")) }}
+            {{- if ($cfg.gateway).feishu.webhookPath }}
             - name: FEISHU_WEBHOOK_PATH
               value: {{ ($cfg.gateway).feishu.webhookPath | quote }}
             {{- end }}
-            {{- if and ($cfg.gateway).feishu.verificationToken (not (hasKey $gwEnv "FEISHU_VERIFICATION_TOKEN")) }}
+            {{- if ($cfg.gateway).feishu.verificationToken }}
             - name: FEISHU_VERIFICATION_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: feishu-verification-token
             {{- end }}
-            {{- if and ($cfg.gateway).feishu.encryptKey (not (hasKey $gwEnv "FEISHU_ENCRYPT_KEY")) }}
+            {{- if ($cfg.gateway).feishu.encryptKey }}
             - name: FEISHU_ENCRYPT_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: feishu-encrypt-key
             {{- end }}
-            {{- if and ($cfg.gateway).feishu.allowedGroups (not (hasKey $gwEnv "FEISHU_ALLOWED_GROUPS")) }}
+            {{- if ($cfg.gateway).feishu.allowedGroups }}
             - name: FEISHU_ALLOWED_GROUPS
               value: {{ ($cfg.gateway).feishu.allowedGroups | join "," | quote }}
             {{- end }}
-            {{- if and ($cfg.gateway).feishu.allowedUsers (not (hasKey $gwEnv "FEISHU_ALLOWED_USERS")) }}
+            {{- if ($cfg.gateway).feishu.allowedUsers }}
             - name: FEISHU_ALLOWED_USERS
               value: {{ ($cfg.gateway).feishu.allowedUsers | join "," | quote }}
             {{- end }}
-            {{- if and (not (($cfg.gateway).feishu).requireMention) (not (hasKey $gwEnv "FEISHU_REQUIRE_MENTION")) }}
+            {{- if not (($cfg.gateway).feishu).requireMention }}
             - name: FEISHU_REQUIRE_MENTION
               value: "false"
             {{- end }}
             {{- end }}
             {{- $hasGoogleChat := or (($cfg.gateway).googleChat).saKeyJson (($cfg.gateway).googleChat).accessToken (($cfg.gateway).googleChat).audience }}
             {{- if $hasGoogleChat }}
-            {{- if not (hasKey $gwEnv "GOOGLE_CHAT_ENABLED") }}
             - name: GOOGLE_CHAT_ENABLED
               value: "true"
-            {{- end }}
-            {{- if and (($cfg.gateway).googleChat).audience (not (hasKey $gwEnv "GOOGLE_CHAT_AUDIENCE")) }}
+            {{- if (($cfg.gateway).googleChat).audience }}
             - name: GOOGLE_CHAT_AUDIENCE
               value: {{ ($cfg.gateway).googleChat.audience | quote }}
             {{- end }}
-            {{- if and (($cfg.gateway).googleChat).saKeyJson (not (hasKey $gwEnv "GOOGLE_CHAT_SA_KEY_JSON")) }}
+            {{- if (($cfg.gateway).googleChat).saKeyJson }}
             - name: GOOGLE_CHAT_SA_KEY_JSON
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: google-chat-sa-key-json
             {{- end }}
-            {{- if and (($cfg.gateway).googleChat).accessToken (not (hasKey $gwEnv "GOOGLE_CHAT_ACCESS_TOKEN")) }}
+            {{- if (($cfg.gateway).googleChat).accessToken }}
             - name: GOOGLE_CHAT_ACCESS_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: google-chat-access-token
             {{- end }}
-            {{- if and (($cfg.gateway).googleChat).webhookPath (not (hasKey $gwEnv "GOOGLE_CHAT_WEBHOOK_PATH")) }}
+            {{- if (($cfg.gateway).googleChat).webhookPath }}
             - name: GOOGLE_CHAT_WEBHOOK_PATH
               value: {{ ($cfg.gateway).googleChat.webhookPath | quote }}
             {{- end }}
             {{- end }}
             {{- $hasWecom := and (($cfg.gateway).wecom).corpId (($cfg.gateway).wecom).agentId (($cfg.gateway).wecom).secret (($cfg.gateway).wecom).token (($cfg.gateway).wecom).encodingAesKey }}
             {{- if $hasWecom }}
-            {{- if not (hasKey $gwEnv "WECOM_CORP_ID") }}
             - name: WECOM_CORP_ID
               value: {{ ($cfg.gateway).wecom.corpId | quote }}
-            {{- end }}
-            {{- if not (hasKey $gwEnv "WECOM_AGENT_ID") }}
             - name: WECOM_AGENT_ID
               value: {{ ($cfg.gateway).wecom.agentId | quote }}
-            {{- end }}
-            {{- if not (hasKey $gwEnv "WECOM_SECRET") }}
             - name: WECOM_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: wecom-secret
-            {{- end }}
-            {{- if not (hasKey $gwEnv "WECOM_TOKEN") }}
             - name: WECOM_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: wecom-token
-            {{- end }}
-            {{- if not (hasKey $gwEnv "WECOM_ENCODING_AES_KEY") }}
             - name: WECOM_ENCODING_AES_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openab.agentFullname" $d }}
                   key: wecom-encoding-aes-key
-            {{- end }}
-            {{- if and (($cfg.gateway).wecom).webhookPath (not (hasKey $gwEnv "WECOM_WEBHOOK_PATH")) }}
+            {{- if (($cfg.gateway).wecom).webhookPath }}
             - name: WECOM_WEBHOOK_PATH
               value: {{ ($cfg.gateway).wecom.webhookPath | quote }}
             {{- end }}
-            {{- if and (($cfg.gateway).wecom).streamingEnabled (not (hasKey $gwEnv "WECOM_STREAMING_ENABLED")) }}
+            {{- if (($cfg.gateway).wecom).streamingEnabled }}
             - name: WECOM_STREAMING_ENABLED
               value: {{ ($cfg.gateway).wecom.streamingEnabled | quote }}
             {{- end }}
-            {{- if and (($cfg.gateway).wecom).debounceSecs (not (hasKey $gwEnv "WECOM_DEBOUNCE_SECS")) }}
+            {{- if (($cfg.gateway).wecom).debounceSecs }}
             - name: WECOM_DEBOUNCE_SECS
               value: {{ ($cfg.gateway).wecom.debounceSecs | quote }}
             {{- end }}
             {{- end }}
-            {{- if not (hasKey $gwEnv "RUST_LOG") }}
             - name: RUST_LOG
               value: {{ ($cfg.gateway).rustLog | default "info" | quote }}
-            {{- end }}
-            {{- range $k, $v := $gwEnv }}
-            - name: {{ $k }}
-              value: {{ $v | quote }}
-            {{- end }}
-          {{- with ($cfg.gateway).envFrom }}
-          envFrom:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
           livenessProbe:
             httpGet:
               path: /health
