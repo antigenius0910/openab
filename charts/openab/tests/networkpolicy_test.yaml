@@ -352,4 +352,3 @@ tests:
             ports:
               - protocol: TCP
                 port: 443
-

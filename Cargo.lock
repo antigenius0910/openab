@@ -2222,7 +2222,6 @@ dependencies = [
  "aws-sdk-secretsmanager",
  "aws-sigv4",
  "base64",
- "bytes",
  "chrono",
  "chrono-tz",
  "clap",
