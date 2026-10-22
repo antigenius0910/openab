@@ -85,6 +85,21 @@ jobs:
       - name: Verify agent CLI exists
         run: docker run --rm --entrypoint which openab-unified-${{ matrix.target.name }}:test ${{ matrix.target.agent }}
 
+      - name: Verify Node.js runtime version
+        if: contains(fromJSON('["claude","codex","copilot","gemini","kimi","mimocode","opencode","pi"]'), matrix.target.name)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target.name }}" in
+            kimi) arg=NODE24_VERSION ;;
+            *) arg=NODE22_VERSION ;;
+          esac
+          expected=$(awk -F= -v key="ARG $arg" '$1 == key {print $2; exit}' Dockerfile.unified)
+          test -n "$expected" || { echo "::error::Failed to extract $arg from Dockerfile.unified"; exit 1; }
+          actual=$(docker run --rm --entrypoint node openab-unified-${{ matrix.target.name }}:test --version)
+          [ "$actual" = "v$expected" ] || { echo "::error::Node.js version mismatch: expected v$expected ($arg), got $actual"; exit 1; }
+          echo "✅ Node.js $actual"
+
       - name: Verify Codex runtime versions
         if: matrix.target.name == 'codex'
         run: |

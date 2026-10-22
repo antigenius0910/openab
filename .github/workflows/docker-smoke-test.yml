@@ -54,6 +54,21 @@ jobs:
       - name: Verify agent CLI exists
         run: docker run --rm --entrypoint which openab-test${{ matrix.variant.suffix }} ${{ matrix.variant.agent }}
 
+      - name: Verify Node.js runtime version
+        if: contains(fromJSON('["-claude","-codex","-gemini","-copilot","-opencode","-kimi","-mimocode","-pi"]'), matrix.variant.suffix)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.variant.suffix }}" in
+            -kimi) arg=NODE24_VERSION ;;
+            *) arg=NODE22_VERSION ;;
+          esac
+          expected=$(awk -F= -v key="ARG $arg" '$1 == key {print $2; exit}' ${{ matrix.variant.dockerfile }})
+          test -n "$expected" || { echo "::error::Failed to extract $arg from ${{ matrix.variant.dockerfile }}"; exit 1; }
+          actual=$(docker run --rm --entrypoint node openab-test${{ matrix.variant.suffix }} --version)
+          [ "$actual" = "v$expected" ] || { echo "::error::Node.js version mismatch: expected v$expected ($arg), got $actual"; exit 1; }
+          echo "✅ Node.js $actual"
+
       - name: Verify Codex runtime versions
         if: matrix.variant.suffix == '-codex'
         run: |
@@ -169,6 +184,8 @@ jobs:
             }
           }
 
+          assert_line 'ARG NODE22_VERSION=22.23.4' Dockerfile.claude Dockerfile.codex Dockerfile.copilot Dockerfile.gemini Dockerfile.mimocode Dockerfile.opencode Dockerfile.pi Dockerfile.package Dockerfile.unified
+          assert_line 'ARG NODE24_VERSION=24.22.1' Dockerfile.kimi Dockerfile.package Dockerfile.unified
           assert_line 'ARG KIRO_CLI_VERSION=2.25.0' Dockerfile Dockerfile.package Dockerfile.unified
           assert_line 'ARG KIRO_SHA256_AMD64=3e924de9697717b99891bb5f7d2a4bd9c768b8bfa1c498b35b3d242948512984' Dockerfile Dockerfile.package Dockerfile.unified
           assert_line 'ARG KIRO_SHA256_ARM64=cc8a2df90cd354b569b81ed4653db4796c86a69866568b4eb7fa7906afc95309' Dockerfile Dockerfile.package Dockerfile.unified

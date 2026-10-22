@@ -328,7 +328,9 @@ jobs:
           # The BUILD_ARGS literals above are indented for readability; strip any
           # leading whitespace so each emitted line is a clean KEY=VALUE that
           # build-push-action's build-args parser accepts. Drop blank lines too.
-          printf '%s\n' "$BUILD_ARGS" | sed 's/^[[:space:]]*//' | grep -v '^$' > resolved/build_args
+          # Nightly is the Node canary: pass only the major so the base image
+          # floats to the latest patch instead of the pinned Dockerfile default.
+          printf '%s\n' "$BUILD_ARGS" NODE22_VERSION=22 NODE24_VERSION=24 | sed 's/^[[:space:]]*//' | grep -v '^$' > resolved/build_args
           printf '%s\n' "$REPORT" > resolved/report
 
       - name: Upload resolved build args
