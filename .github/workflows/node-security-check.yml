@@ -1,0 +1,26 @@
+name: Node security check
+
+on:
+  schedule:
+    - cron: '47 7 * * *'  # daily at 07:47 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# A scheduled run and a manual dispatch racing could each create an issue.
+concurrency:
+  group: node-security-check
+
+jobs:
+  check:
+    if: github.repository == 'openabdev/openab'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compare Node pins and published images with Node.js security releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/node_security_check.sh
