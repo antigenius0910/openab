@@ -29,18 +29,25 @@ set -euo pipefail
 
 # Build args that may be used directly as a base image. BUILDER_IMAGE selects
 # the openab builder in Dockerfile.unified and is never a Node.js runtime base.
+# CI can override it, so only its declared ARG default is checked.
 ALLOWED_VAR_BASES="BUILDER_IMAGE"
 
 parse() { # parse <mode> <dockerfile> [target]
   awk -v mode="$1" -v target="${3:-}" -v allowed=" $ALLOWED_VAR_BASES " '
     # Classify one FROM image reference. Returns "node <ARG>", "none", or
     # "error <message>". Stage references inherit the referenced stage.
-    function classify(img,   key, ref, var, probe) {
+    function classify(img, depth,   key, ref, var, probe) {
       key = tolower(img)
       if (key in stage) return stage[key]
       if (img ~ /^[$][{]?[A-Za-z_][A-Za-z0-9_]*[}]?$/) {
         var = img; gsub(/[${}]/, "", var)
-        if (index(allowed, " " var " ")) return "none"
+        if (index(allowed, " " var " ")) {
+          # CI may override an allowed build arg, but its declared default must
+          # not be a Node.js base either (e.g. ARG BUILDER_IMAGE=node:22).
+          if (!(var in argdef) || argdef[var] == "") return "none"
+          if (depth > 8) return "error " img " default refers back to itself"
+          return classify(argdef[var], depth + 1)
+        }
         return "error FROM " img " takes its base image from a build arg, which can hide an unpinned Node.js base; use node:${NODE<major>_VERSION}-<suffix> or a named stage (allowed build args:" allowed ")"
       }
       # Any other build arg in the reference (e.g. node${TAG}-slim, ${REG}/node:...)
@@ -62,8 +69,17 @@ parse() { # parse <mode> <dockerfile> [target]
       print "::error file=" FILENAME ",line=" lineno "::" msg > "/dev/stderr"
       failed = 1
     }
-    function from(line, lineno,   f, n, i, img, name, class) {
+    function from(line, lineno,   f, n, i, img, name, class, eq, v) {
       n = split(line, f)
+      if (toupper(f[1]) == "ARG") {                    # remember ARG defaults for allowed build args
+        for (i = 2; i <= n; i++) {
+          eq = index(f[i], "=")
+          if (eq == 0) continue
+          v = substr(f[i], eq + 1); gsub(/^"|"$/, "", v)
+          argdef[substr(f[i], 1, eq - 1)] = v
+        }
+        return
+      }
       if (toupper(f[1]) != "FROM") return
       img = ""; name = ""
       for (i = 2; i <= n; i++) {
@@ -72,7 +88,7 @@ parse() { # parse <mode> <dockerfile> [target]
         if (toupper(f[i]) == "AS" && i < n) { name = tolower(f[i + 1]); break }
       }
       if (img == "") { report(lineno, "FROM without an image reference"); return }
-      class = classify(img)
+      class = classify(img, 0)
       if (class ~ /^error / && !(tolower(img) in stage))  # report each bad base once, not per child stage
         report(lineno, substr(class, 7))
       if (class ~ /^node /) used[substr(class, 6)] = 1

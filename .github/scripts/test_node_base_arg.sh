@@ -36,6 +36,11 @@ expect registry-pinned 0 NODE22_VERSION '' 'FROM docker.io/library/node:${NODE22
 expect digest-on-pin   0 NODE22_VERSION '' 'FROM node:${NODE22_VERSION}-slim@sha256:0000 AS app\n' @ app
 expect non-node        0 ''             '' 'FROM debian:trixie-slim AS base\nFROM base AS app\n' @ app
 expect allowed-var     0 ''             '' 'FROM ${BUILDER_IMAGE} AS builder\nFROM debian AS app\n' @ app
+expect allowed-var-stage 0 ''           '' 'FROM rust AS local_builder\nARG BUILDER_IMAGE=local_builder\nFROM ${BUILDER_IMAGE} AS builder\n' @ builder
+expect allowed-var-node  1 '' 'is not pinned' 'ARG BUILDER_IMAGE=node:22\nFROM ${BUILDER_IMAGE} AS app\n' @ app
+expect allowed-var-loop  1 '' 'refers back'   'ARG BUILDER_IMAGE=${BUILDER_IMAGE}\nFROM ${BUILDER_IMAGE} AS app\n' @ app
+expect param-expansion 1 '' 'cannot be resolved' 'FROM ${BASE:-node:22-trixie-slim} AS app\n' @ app
+expect bare-composite  1 '' 'cannot be resolved' 'FROM $BASE-node AS app\n' @ app
 
 # Fail closed on Node.js bases that are not pinned through the ARG
 expect literal-tag     1 '' 'is not pinned'      'FROM node:22-trixie-slim AS app\n' @ app
