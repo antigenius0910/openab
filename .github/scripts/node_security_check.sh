@@ -146,7 +146,7 @@ $(render_tables)
 
 ### Next steps
 
-1. For each stale pin, bump \`ARG NODE<major>_VERSION\` to the latest security release in every Dockerfile that declares it (\`git grep -lE 'ARG NODE(22|24)_VERSION' -- 'Dockerfile*'\`). The smoke tests check that the values match.
+1. For each stale pin, bump \`ARG NODE<major>_VERSION\` to the latest security release in every Dockerfile that declares it (\`git grep -lE 'ARG NODE[0-9]+_VERSION' -- 'Dockerfile*'\`). The smoke tests check that the values match.
 2. Follow the "Base image security release" runbook in [RELEASING.md](https://github.com/$REPO/blob/main/RELEASING.md#base-image-security-release) to cut a beta, verify \`node --version\` in each \`beta-<agent>\` image, and promote to stable.
 3. Background and policy: #1567.
 
