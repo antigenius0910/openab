@@ -135,31 +135,26 @@ Node.js base image 或其他 upstream component 出 security release 時，照�
 1. 找出所有宣告 pin 的 Dockerfile：
 
    ```bash
-   git grep -lE 'ARG NODE(22|24)_VERSION' -- 'Dockerfile*'
+   git grep -lE 'ARG NODE[0-9]+_VERSION' -- 'Dockerfile*'
    ```
 
-2. 在每個檔案把 `NODE22_VERSION` 和 `NODE24_VERSION` 改成修補後的版本。
-3. 開 PR。Smoke tests 會檢查 `node --version` 等於 ARG，CI 通過就代表 image 用了新版 Node.js。
+2. 每個 Dockerfile 只宣告它自己用到的 Node.js major 的 ARG，例如 `Dockerfile.kimi` 只有 `NODE24_VERSION`。在上面列出的每個檔案，把它宣告的 ARG 改成修補後的版本。
+3. 開 PR。Smoke tests 從 Dockerfile 讀預期的版本（以 `Dockerfile.unified` 為準），所以 bump 只改 `Dockerfile*`，不用改 workflow。Image 含 Node.js 卻沒有對應的 pin，或各檔案的 pin 不一致時，smoke test 會失敗。CI 通過就代表 image 用了新版 Node.js。
 
 ##### Step 3 — 出下一個 beta
 
 1. Bump PR merge 後，照 [Release Flow](#release-flow-tag-driven) 的 Step 1 和 Step 2 出下一個 beta。目前已經是 beta 時，留空 version 就會得到下一個 beta 號碼。
-2. 等 `build-operator.yml` 跑完，確認每個含 Node.js 的 agent 都拿到新版。`kimi` 用 Node.js 24，其他用 Node.js 22：
+2. 等 `build-operator.yml` 跑完，確認每個含 Node.js 的 agent 都拿到新版。在 repo root 執行。`NODE_AGENTS` 從 `Dockerfile.unified` 取出 `FROM base-node` 和 `FROM node:${NODE<n>_VERSION}...` 的 stage，排除 `base-*`：
 
    ```bash
-   for agent in claude codex copilot gemini kimi mimocode opencode pi; do
+   NODE_AGENTS=$(awk 'toupper($1) == "FROM" && toupper($3) == "AS" && $4 !~ /^base-/ && ($2 == "base-node" || $2 ~ /^node:\$\{NODE[0-9]+_VERSION\}/) { print $4 }' Dockerfile.unified)
+   for agent in $NODE_AGENTS; do
      printf '%s: ' "$agent"
      docker run --rm --pull always --entrypoint node "ghcr.io/openabdev/openab:beta-$agent" --version
    done
    ```
 
-3. 如果 GitHub Actions cache 給了舊的 base layer，image 裡的 Node.js 會是舊版。這時不用 cache 重 build 同一個 tag：
-
-   ```bash
-   gh workflow run build-operator.yml --ref <tag> -f tag=<tag> -f no_cache=true
-   ```
-
-   這會覆蓋 `<version>-<agent>`。只在 beta 剛 build 完、還沒公告前這樣做。已公告的版本要修，就出下一個 beta。
+3. 如果驗證看到舊的 Node.js，修好原因後出下一個 beta，不要重新 push 已經存在的 version tag。
 
 ##### Step 4 — Promote 到 stable
 
@@ -169,28 +164,32 @@ Promote 完成後，把 Step 3 的迴圈換成 `stable-$agent` 再跑一次。
 
 ##### Step 5 — 發 release note
 
-chart-releaser 建立的 `openab-<version>` GitHub Release 已經有 `release.yml` 附加的安裝說明。把 security note 加在最前面，不要覆蓋原本內容：
+chart-releaser 建立的 `openab-<version>` GitHub Release 已經有 `release.yml` 附加的安裝說明。把 security note 加在最前面，不要覆蓋原本內容。`VERSION` 是 promote 後的 stable chart version，不加 `v`。例如 `VERSION=0.10.0` 對應 release `openab-0.10.0`：
 
 ```bash
-VERSION=<version>
+VERSION=0.10.0
 gh release view "openab-$VERSION" -R openabdev/openab --json body --jq .body > existing.md
-cat security-note.md existing.md > release-note.md
-gh release edit "openab-$VERSION" -R openabdev/openab --notes-file release-note.md
+if grep -qF '<!-- security-note -->' existing.md; then
+  echo "openab-$VERSION already has a security note. Edit it by hand." >&2
+else
+  { cat security-note.md; printf '\n\n'; cat existing.md; } > release-note.md
+  gh release edit "openab-$VERSION" -R openabdev/openab --notes-file release-note.md
+fi
 ```
 
-在 `node-security` issue 留下 release 連結後關閉它。
+Release 已經有 `<!-- security-note -->` 時，指令會停下來，不會再加一次。這時在 GitHub 上手動改 release note。
 
-`security-note.md` 用下面的 template。Release note 用英文。
+在 `node-security` issue 留下 release 連結。Pin 和 image 都更新後，`node-security-check.yml` 下一次執行會自己關閉這個 issue。
 
-- 這個 release 同時帶 breaking change 時，一定要填 "Breaking changes and migration"。沒有 breaking change 才刪掉這一段。
-- Per-agent repositories 的刪除日期填 release 後 2 到 4 週。刪除由 org admin 執行。GHCR package 刪除後無法復原。
+`security-note.md` 用下面的 template。Release note 用英文。`<agent list>` 填 Step 3 的 `NODE_AGENTS`。這個 release 同時帶 breaking change 時，在 note 裡另外加一段 migration（例如 #1567 要求 0.10.0 要有）。
 
 ````markdown
+<!-- security-note -->
 ## Security
 
-This release ships images built on Node.js <22.x.y> (Node.js <24.x.y> for `kimi`) to fix <CVE IDs, or a link to the Node.js security release>.
+This release updates the Node.js base image to <22.x.y> and <24.x.y> to fix <CVE IDs, or a link to the Node.js security release>.
 
-- These agent images contain Node.js and get the fix: `claude`, `codex`, `copilot`, `gemini`, `kimi`, `mimocode`, `opencode`, and `pi`. The other agent images do not contain Node.js.
+- The agent images built on Node.js (<agent list>) get the fix. The other agent images do not contain Node.js.
 - The floating tags `stable-<agent>`, `<major.minor>-<agent>`, and `beta-<agent>` now point to this build. A deployment that uses one of them gets the fix on its next image pull.
 - Existing version tags are not rebuilt. `<previous-version>-<agent>` and earlier versions keep the old Node.js. To get the fix, move to `<version>-<agent>`.
 - Releases older than `<major.minor>` get no fix. Only the latest minor line is supported. See [SECURITY.md](https://github.com/openabdev/openab/blob/main/SECURITY.md).
@@ -201,17 +200,7 @@ To check the Node.js version in an image, run:
 docker run --rm --pull always --entrypoint node ghcr.io/openabdev/openab:<version>-<agent> --version
 ```
 
-The output is `v<22.x.y>`. For `kimi`, the output is `v<24.x.y>`.
-
-## Breaking changes and migration
-
-<!-- Required when this release also carries a breaking change. Delete this section only when it has none. -->
-
-<For each breaking change, say who it affects and the exact steps to take before upgrading.>
-
-## Deprecated per-agent image repositories
-
-The per-agent repositories, such as `ghcr.io/openabdev/openab-claude`, do not receive updates. They do not have this fix. An org admin deletes them on <YYYY-MM-DD>. After that date, a deployment that pulls from them fails with `ImagePullBackOff`. Move to `ghcr.io/openabdev/openab:<tag>-<agent>`. See [Docker image tags](https://github.com/openabdev/openab/blob/main/docs/image-tags.md).
+The output is the patched Node.js version for that image, `v<22.x.y>` or `v<24.x.y>`.
 ````
 
 ## GitHub Releases
