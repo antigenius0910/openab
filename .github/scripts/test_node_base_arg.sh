@@ -67,17 +67,20 @@ expect check-pins      0 "$tmp/check-pins.Dockerfile NODE22_VERSION" '' \
   'FROM node:${NODE22_VERSION}-slim AS a\nFROM a AS b\nFROM debian AS c\n' --check @
 expect check-bad       1 '' 'is not pinned' 'FROM debian AS a\nFROM --platform=linux/amd64 node:22 AS b\n' --check @
 
-# Current repository Dockerfiles resolve exactly as the old hand-written allowlist did
-for t in claude codex copilot gemini mimocode opencode pi; do
-  for f in Dockerfile.unified Dockerfile.package; do
-    [ "$("$script" "$f" "$t")" = NODE22_VERSION ] || { echo "FAIL repo $f $t"; failures=$((failures + 1)); }
-  done
-done
+# Current repository Dockerfiles resolve exactly as the old hand-written allowlist did.
+# repo_expect checks the exit status too, so a crash cannot pass as "not Node-based".
+repo_expect() { # repo_expect <dockerfile> <target> <want_stdout>
+  local out
+  if ! out=$("$script" "$1" "$2"); then
+    echo "FAIL repo $1 $2: exited non-zero"; failures=$((failures + 1))
+  elif [ "$out" != "$3" ]; then
+    echo "FAIL repo $1 $2: got [$out], want [$3]"; failures=$((failures + 1))
+  fi
+}
 for f in Dockerfile.unified Dockerfile.package; do
-  [ "$("$script" "$f" kimi)" = NODE24_VERSION ] || { echo "FAIL repo $f kimi"; failures=$((failures + 1)); }
-  for t in kiro cursor grok devin antigravity native agentcore; do
-    [ -z "$("$script" "$f" "$t")" ] || { echo "FAIL repo $f $t"; failures=$((failures + 1)); }
-  done
+  for t in claude codex copilot gemini mimocode opencode pi; do repo_expect "$f" "$t" NODE22_VERSION; done
+  repo_expect "$f" kimi NODE24_VERSION
+  for t in kiro cursor grok devin antigravity native agentcore; do repo_expect "$f" "$t" ''; done
 done
 echo "ok   repository targets"
 
