@@ -47,7 +47,16 @@ expect missing-suffix  1 '' 'has no tag suffix'  'FROM node:${NODE22_VERSION} AS
 expect var-base        1 '' 'from a build arg'   'ARG BASE=node:22-slim\nFROM ${BASE} AS app\n' @ app
 expect var-base-plain  1 '' 'from a build arg'   'ARG BASE=node:22-slim\nFROM $BASE AS app\n' @ app
 expect hidden-stage    1 '' 'is not pinned'      'FROM node:22-slim AS Base\nFROM base AS mid\nFROM debian AS app\n' @ app
+expect index-registry  1 '' 'is not pinned'      'FROM index.docker.io/library/node:22 AS app\n' @ app
+expect mirror-registry 1 '' 'is not pinned'      'FROM mirror.gcr.io/library/node:22 AS app\n' @ app
+expect ecr-mirror      1 '' 'is not pinned'      'FROM public.ecr.aws/docker/library/node:22 AS app\n' @ app
+expect continued-bad   1 '' 'is not pinned'      'FROM \\\n  node:22-slim AS app\n' @ app
+expect continued-cmt   1 '' 'is not pinned'      'FROM --platform=linux/amd64 \\\n# a comment\n  node:22-slim \\\n  AS app\n' @ app
+expect empty-from      1 '' 'without an image'   'FROM\n' @
+expect escape-directive 1 '' 'escape parser'     '# escape=`\nFROM debian AS app\n' @ app
 expect unknown-target  1 '' 'not found'          'FROM debian AS app\n' @ nope
+expect continued-ok    0 NODE24_VERSION ''       'FROM \\\n  node:${NODE24_VERSION}-trixie-slim \\\n  AS app\n' @ app
+expect other-repo      0 ''             ''       'FROM ghcr.io/openabdev/openab-native:beta AS app\nFROM rust:1@sha256:00 AS b\n' @ app
 
 # --check mode: every stage, one line per pin used
 expect check-pins      0 "$tmp/check-pins.Dockerfile NODE22_VERSION" '' \

@@ -12,10 +12,13 @@
 #       once per pin each file uses.
 #
 # Both modes scan every FROM in the file and exit 1 if any stage:
-#   - references a Node.js image (node:, node@, library/node, docker.io/library/node)
+#   - references a Node.js image (any registry or namespace whose repository is
+#     "node", e.g. node:, node@, library/node, mirror.gcr.io/library/node)
 #     not written as node:${NODE<n>_VERSION}-<suffix>; or
 #   - takes its base from a build arg (FROM ${VAR}) other than an allowlisted one,
 #     since that can hide an unpinned Node.js base.
+# FROM lines continued with "\" are joined first, as Docker does; a FROM with no
+# image, or an "# escape=" parser directive, is rejected.
 # The first mode also fails if <target> is not a stage in the file.
 # Stage names are matched case-insensitively, as Docker does.
 set -euo pipefail
@@ -37,8 +40,7 @@ parse() { # parse <mode> <dockerfile> [target]
         return "error FROM " img " takes its base image from a build arg, which can hide an unpinned Node.js base; use node:${NODE<major>_VERSION}-<suffix> or a named stage (allowed build args:" allowed ")"
       }
       ref = img
-      if (tolower(substr(ref, 1, 10)) == "docker.io/") ref = substr(ref, 11)
-      if (tolower(substr(ref, 1, 8)) == "library/") ref = substr(ref, 9)
+      sub(/^.*\//, "", ref)                                 # any registry/namespace: keep the repository name
       if (match(ref, /^node:[$][{]NODE[0-9]+_VERSION[}]-./))
         return "node " substr(ref, 8, index(ref, "}") - 8)   # text between "node:${" and "}"
       if (ref ~ /^node:[$][{]NODE[0-9]+_VERSION[}]$/)
@@ -47,23 +49,44 @@ parse() { # parse <mode> <dockerfile> [target]
         return "error " img " is not pinned; use node:${NODE<major>_VERSION}-<suffix>"
       return "none"
     }
-    toupper($1) == "FROM" {
+    function report(lineno, msg) {
+      print "::error file=" FILENAME ",line=" lineno "::" msg > "/dev/stderr"
+      failed = 1
+    }
+    function from(line, lineno,   f, n, i, img, name, class) {
+      n = split(line, f)
+      if (toupper(f[1]) != "FROM") return
       img = ""; name = ""
-      for (i = 2; i <= NF; i++) {
-        if ($i ~ /^--/) continue                       # skip --platform=... and other flags
-        if (img == "") { img = $i; continue }
-        if (toupper($i) == "AS" && i < NF) { name = tolower($(i + 1)); break }
+      for (i = 2; i <= n; i++) {
+        if (f[i] ~ /^--/) continue                      # skip --platform=... and other flags
+        if (img == "") { img = f[i]; continue }
+        if (toupper(f[i]) == "AS" && i < n) { name = tolower(f[i + 1]); break }
       }
+      if (img == "") { report(lineno, "FROM without an image reference"); return }
       class = classify(img)
-      if (class ~ /^error / && !(tolower(img) in stage)) {   # report each bad base once, not per child stage
-        print "::error file=" FILENAME ",line=" FNR "::" substr(class, 7) > "/dev/stderr"
-        failed = 1
-      }
+      if (class ~ /^error / && !(tolower(img) in stage))  # report each bad base once, not per child stage
+        report(lineno, substr(class, 7))
       if (class ~ /^node /) used[substr(class, 6)] = 1
       if (name != "") stage[name] = class
       last = class
     }
+    # A parser directive can change the line-continuation character; refuse it
+    # rather than misread continued FROM lines.
+    tolower($0) ~ /^#[[:space:]]*escape[[:space:]]*=/ {
+      report(FNR, "the escape parser directive is not supported by node_base_arg.sh")
+      next
+    }
+    /^[[:space:]]*#/ { next }                            # comments, also inside continuations
+    {
+      # Docker joins lines ending in "\" before parsing an instruction.
+      line = $0
+      if (buf == "") start = FNR
+      if (line ~ /\\[[:space:]]*$/) { sub(/\\[[:space:]]*$/, " ", line); buf = buf line; next }
+      from(buf line, start)
+      buf = ""
+    }
     END {
+      if (buf != "") from(buf, start)
       if (failed) exit 1
       if (mode == "check") {
         for (arg in used) print FILENAME, arg
