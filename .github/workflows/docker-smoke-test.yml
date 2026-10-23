@@ -188,16 +188,27 @@ jobs:
           # Any Dockerfile built FROM node:${NODE<n>_VERSION} must carry the same
           # pin as Dockerfile.unified, so a Node bump edits only Dockerfiles and a
           # partial bump fails; a literal node: tag fails.
-          while IFS= read -r f; do
-            if grep -n '^FROM node:[^$]' "$f"; then
-              echo "::error::$f uses an unpinned node: base image; use node:\${NODE<major>_VERSION}-..." >&2
-              exit 1
-            fi
-            for arg in $(grep -o '^FROM node:[$]{NODE[0-9]*_VERSION}' "$f" | sed 's/^FROM node:[$]{//; s/}$//' | sort -u); do
+          # node_base_arg.sh --all is the only Dockerfile parser, shared with the
+          # runtime check, so both accept the same FROM forms.
+          dockerfiles=$(git ls-files 'Dockerfile*' '*/Dockerfile*')
+          [ -n "$dockerfiles" ] || { echo "::error::no Dockerfiles found" >&2; exit 1; }
+          for f in $dockerfiles; do
+            args=$(.github/scripts/node_base_arg.sh --all "$f")
+            for arg in $(sort -u <<<"$args"); do
               pin=$(grep -m1 "^ARG $arg=" Dockerfile.unified) || { echo "::error::$arg is not pinned in Dockerfile.unified" >&2; exit 1; }
               assert_line "$pin" "$f"
             done
-          done < <(git grep -l '^FROM node:' -- 'Dockerfile*')
+          done
+          fixture=$(mktemp)
+          for unpinned in 'FROM --platform=$TARGETPLATFORM node:22-trixie-slim AS x' 'from node:22-trixie-slim as x'; do
+            printf '%s\n' "$unpinned" > "$fixture"
+            if .github/scripts/node_base_arg.sh --all "$fixture" 2>/dev/null; then
+              echo "::error::node_base_arg.sh --all accepted an unpinned base: $unpinned" >&2
+              exit 1
+            fi
+          done
+          printf '%s\n' 'ARG NODE22_VERSION=22.0.0' 'FROM --platform=$BUILDPLATFORM node:${NODE22_VERSION}-trixie-slim AS x' > "$fixture"
+          [ "$(.github/scripts/node_base_arg.sh --all "$fixture")" = NODE22_VERSION ] || { echo "::error::node_base_arg.sh --all missed a pinned --platform base" >&2; exit 1; }
           assert_line 'ARG KIRO_CLI_VERSION=2.25.0' Dockerfile Dockerfile.package Dockerfile.unified
           assert_line 'ARG KIRO_SHA256_AMD64=3e924de9697717b99891bb5f7d2a4bd9c768b8bfa1c498b35b3d242948512984' Dockerfile Dockerfile.package Dockerfile.unified
           assert_line 'ARG KIRO_SHA256_ARM64=cc8a2df90cd354b569b81ed4653db4796c86a69866568b4eb7fa7906afc95309' Dockerfile Dockerfile.package Dockerfile.unified
