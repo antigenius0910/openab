@@ -46,6 +46,10 @@ expect bare-node       1 '' 'is not pinned'      'FROM node AS app\n' @ app
 expect missing-suffix  1 '' 'has no tag suffix'  'FROM node:${NODE22_VERSION} AS app\n' @ app
 expect var-base        1 '' 'from a build arg'   'ARG BASE=node:22-slim\nFROM ${BASE} AS app\n' @ app
 expect var-base-plain  1 '' 'from a build arg'   'ARG BASE=node:22-slim\nFROM $BASE AS app\n' @ app
+expect var-in-tag      1 '' 'cannot be resolved' 'FROM node${TAG}-slim AS app\n' @ app
+expect var-image-name  1 '' 'cannot be resolved' 'FROM ${IMG}:22 AS app\n' @ app
+expect var-registry    1 '' 'cannot be resolved' 'FROM ${REG}/node:${NODE22_VERSION}-slim AS app\n' @ app
+expect var-node-tag    1 '' 'cannot be resolved' 'FROM node:${TAG} AS app\n' @ app
 expect hidden-stage    1 '' 'is not pinned'      'FROM node:22-slim AS Base\nFROM base AS mid\nFROM debian AS app\n' @ app
 expect index-registry  1 '' 'is not pinned'      'FROM index.docker.io/library/node:22 AS app\n' @ app
 expect mirror-registry 1 '' 'is not pinned'      'FROM mirror.gcr.io/library/node:22 AS app\n' @ app

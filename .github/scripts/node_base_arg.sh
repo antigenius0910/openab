@@ -16,9 +16,13 @@
 #     "node", e.g. node:, node@, library/node, mirror.gcr.io/library/node)
 #     not written as node:${NODE<n>_VERSION}-<suffix>; or
 #   - takes its base from a build arg (FROM ${VAR}) other than an allowlisted one,
-#     since that can hide an unpinned Node.js base.
+#     or uses any build arg other than ${NODE<n>_VERSION} inside the reference
+#     (e.g. node${TAG}-slim, ${REG}/node:...), since that can hide an unpinned
+#     Node.js base.
 # FROM lines continued with "\" are joined first, as Docker does; a FROM with no
 # image, or an "# escape=" parser directive, is rejected.
+# Known limitation: a line starting with FROM inside a RUN heredoc is parsed as
+# an instruction. That can only add a false error, never hide a Node.js base.
 # The first mode also fails if <target> is not a stage in the file.
 # Stage names are matched case-insensitively, as Docker does.
 set -euo pipefail
@@ -31,7 +35,7 @@ parse() { # parse <mode> <dockerfile> [target]
   awk -v mode="$1" -v target="${3:-}" -v allowed=" $ALLOWED_VAR_BASES " '
     # Classify one FROM image reference. Returns "node <ARG>", "none", or
     # "error <message>". Stage references inherit the referenced stage.
-    function classify(img,   key, ref, var) {
+    function classify(img,   key, ref, var, probe) {
       key = tolower(img)
       if (key in stage) return stage[key]
       if (img ~ /^[$][{]?[A-Za-z_][A-Za-z0-9_]*[}]?$/) {
@@ -39,6 +43,11 @@ parse() { # parse <mode> <dockerfile> [target]
         if (index(allowed, " " var " ")) return "none"
         return "error FROM " img " takes its base image from a build arg, which can hide an unpinned Node.js base; use node:${NODE<major>_VERSION}-<suffix> or a named stage (allowed build args:" allowed ")"
       }
+      # Any other build arg in the reference (e.g. node${TAG}-slim, ${REG}/node:...)
+      # cannot be resolved statically, so it could hide an unpinned Node.js base.
+      probe = img; gsub(/[$][{]NODE[0-9]+_VERSION[}]/, "", probe)
+      if (probe ~ /[$]/)
+        return "error " img " uses a build arg that cannot be resolved statically; only ${NODE<major>_VERSION} may appear in a base image reference"
       ref = img
       sub(/^.*\//, "", ref)                                 # any registry/namespace: keep the repository name
       if (match(ref, /^node:[$][{]NODE[0-9]+_VERSION[}]-./))

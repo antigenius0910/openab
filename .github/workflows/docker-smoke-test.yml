@@ -5,6 +5,9 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'Dockerfile*'
+      # validate-packaged-pins checks Node.js pins in every tracked Dockerfile,
+      # including nested ones such as openshell/Dockerfile.
+      - '**/Dockerfile*'
       - 'src/**'
       - 'crates/**'
       - 'Cargo.*'
