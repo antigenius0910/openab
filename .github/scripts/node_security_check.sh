@@ -14,7 +14,8 @@ set -euo pipefail
 shopt -s inherit_errexit
 
 DOCKERFILE=${DOCKERFILE:-Dockerfile.unified}
-# close-unlinked-stale-issues.yml and issue-check.yml exempt this literal label; rename it in all three.
+# Reserved for this script's tracker. close-unlinked-stale-issues.yml and issue-check.yml
+# exempt it by label alone; rename it in all three files (this script and both workflows).
 LABEL='node-security'
 MARKER='<!-- node-security-check -->'
 REPO=openabdev/openab
@@ -149,15 +150,16 @@ render_tables() {
 render_issue_body() {
   cat <<EOF
 $MARKER
-Node.js has published a security release that a pinned base image or a published openab image is behind on. The \`node-security-check\` workflow keeps this issue up to date daily and closes it once every pin and published image is current.
+A pinned base image or a published openab image is behind the latest Node.js security release for its line, or is on the wrong Node major. The \`node-security-check\` workflow keeps this issue up to date daily and closes it once every pin and published image is current.
 
 $(render_tables)
 
 ### Next steps
 
 1. For each stale pin, bump \`ARG NODE<major>_VERSION\` to the latest security release in every Dockerfile that declares it (\`git grep -lE 'ARG NODE[0-9]+_VERSION' -- 'Dockerfile*'\`). \`$DOCKERFILE\` declares every line and each other Dockerfile declares only its own. The smoke tests read the expected versions from the Dockerfiles, so a bump needs no workflow edit.
-2. Follow the "Base image security release" runbook in [RELEASING.md](https://github.com/$REPO/blob/main/RELEASING.md#base-image-security-release) to cut a beta, verify \`node --version\` in each \`beta-<agent>\` image, and promote to stable.
-3. Background and policy: #1567.
+2. A \`major mismatch\` row means the pin or image is on a different Node major than its line. Fix the \`ARG NODE<major>_VERSION\` value, or rebuild the image from the correct line, instead of bumping the patch version.
+3. Follow the "Base image security release" runbook in [RELEASING.md](https://github.com/$REPO/blob/main/RELEASING.md#base-image-security-release) to cut a beta, verify \`node --version\` in each \`beta-<agent>\` image, and promote to stable.
+4. Background and policy: #1567.
 
 Last checked: $(date -u '+%Y-%m-%d %H:%M UTC')
 EOF
@@ -166,7 +168,8 @@ EOF
 issue_title() {
   local m versions=()
   for m in "${MAJORS[@]}"; do
-    if [[ -n ${STALE_MAJOR[$m]:-} ]]; then versions+=("${LATEST[$m]}"); fi
+    # A line can be behind on major mismatch alone, with no security release to name.
+    if [[ -n ${STALE_MAJOR[$m]:-} ]]; then versions+=("${LATEST[$m]:-Node $m major mismatch}"); fi
   done
   local joined
   joined=$(printf '%s / ' "${versions[@]}")
@@ -193,8 +196,9 @@ ensure_label() {
 reconcile() {
   local issue action has_issue=0
   # Only issues carrying MARKER are ours; a hand-labeled issue is left alone.
-  issue=$(gh issue list --label "$LABEL" --state open --json number,body \
-    --jq "[.[] | select(.body | contains(\"$MARKER\"))][0].number // empty")
+  # The label is reserved for this script, so at most one open issue is expected.
+  issue=$(gh issue list --label "$LABEL" --state open --limit 100 --json number,body \
+    --jq "[.[] | select((.body // \"\") | contains(\"$MARKER\"))][0].number // empty")
   if [[ -n $issue ]]; then has_issue=1; fi
   action=$(decide "$1" "$has_issue")
   echo "decision: $action${issue:+ (#$issue)}"
