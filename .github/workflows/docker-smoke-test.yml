@@ -185,11 +185,9 @@ jobs:
             }
           }
 
-          assert_line 'ARG NODE22_VERSION=22.23.4' Dockerfile.claude Dockerfile.codex Dockerfile.copilot Dockerfile.gemini Dockerfile.mimocode Dockerfile.opencode Dockerfile.pi Dockerfile.package Dockerfile.unified
-          assert_line 'ARG NODE24_VERSION=24.22.1' Dockerfile.kimi Dockerfile.package Dockerfile.unified
           # Any Dockerfile built FROM node:${NODE<n>_VERSION} must carry the same
-          # pin as Dockerfile.unified, so a Node-based Dockerfile missing from the
-          # lists above cannot ship a different version; a literal node: tag fails.
+          # pin as Dockerfile.unified, so a Node bump edits only Dockerfiles and a
+          # partial bump fails; a literal node: tag fails.
           while IFS= read -r f; do
             if grep -n '^FROM node:[^$]' "$f"; then
               echo "::error::$f uses an unpinned node: base image; use node:\${NODE<major>_VERSION}-..." >&2
