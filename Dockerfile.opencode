@@ -23,8 +23,8 @@ COPY src/ src/
 RUN touch src/main.rs crates/openab-core/src/lib.rs crates/openab-gateway/src/lib.rs crates/openab-mcp/src/lib.rs crates/openab-cp/src/lib.rs && cargo build --release
 
 # --- Runtime stage ---
-# node:${NODE22_VERSION}-trixie-slim mirrors the base image used by
-# Dockerfile.claude, Dockerfile.codex, and Dockerfile.gemini, keeping the
+# node:${NODE22_VERSION}-trixie-slim mirrors the base image used by every
+# Node 22-based agent Dockerfile (all pinned via NODE22_VERSION), keeping the
 # project on a single consistent runtime base.
 #
 # opencode is published to npm as `opencode-ai`; the npm package is a thin

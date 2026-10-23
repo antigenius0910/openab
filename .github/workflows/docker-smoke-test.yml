@@ -8,6 +8,7 @@ on:
       - 'src/**'
       - 'crates/**'
       - 'Cargo.*'
+      - '.github/scripts/node_base_arg.sh'
 
 concurrency:
   group: smoke-test-${{ github.event.pull_request.number }}
@@ -55,14 +56,14 @@ jobs:
         run: docker run --rm --entrypoint which openab-test${{ matrix.variant.suffix }} ${{ matrix.variant.agent }}
 
       - name: Verify Node.js runtime version
-        if: contains(fromJSON('["-claude","-codex","-gemini","-copilot","-opencode","-kimi","-mimocode","-pi"]'), matrix.variant.suffix)
         shell: bash
         run: |
           set -euo pipefail
-          case "${{ matrix.variant.suffix }}" in
-            -kimi) arg=NODE24_VERSION ;;
-            *) arg=NODE22_VERSION ;;
-          esac
+          # Derive the pin from the Dockerfile's base image rather than an agent
+          # allowlist, so a new Node-based variant cannot skip this check, and an
+          # unpinned FROM node: fails here.
+          arg=$(.github/scripts/node_base_arg.sh ${{ matrix.variant.dockerfile }})
+          if [ -z "$arg" ]; then echo "Not a Node.js-based image; skipping."; exit 0; fi
           expected=$(awk -F= -v key="ARG $arg" '$1 == key {print $2; exit}' ${{ matrix.variant.dockerfile }})
           test -n "$expected" || { echo "::error::Failed to extract $arg from ${{ matrix.variant.dockerfile }}"; exit 1; }
           actual=$(docker run --rm --entrypoint node openab-test${{ matrix.variant.suffix }} --version)
@@ -186,6 +187,19 @@ jobs:
 
           assert_line 'ARG NODE22_VERSION=22.23.4' Dockerfile.claude Dockerfile.codex Dockerfile.copilot Dockerfile.gemini Dockerfile.mimocode Dockerfile.opencode Dockerfile.pi Dockerfile.package Dockerfile.unified
           assert_line 'ARG NODE24_VERSION=24.22.1' Dockerfile.kimi Dockerfile.package Dockerfile.unified
+          # Any Dockerfile built FROM node:${NODE<n>_VERSION} must carry the same
+          # pin as Dockerfile.unified, so a Node-based Dockerfile missing from the
+          # lists above cannot ship a different version; a literal node: tag fails.
+          while IFS= read -r f; do
+            if grep -n '^FROM node:[^$]' "$f"; then
+              echo "::error::$f uses an unpinned node: base image; use node:\${NODE<major>_VERSION}-..." >&2
+              exit 1
+            fi
+            for arg in $(grep -o '^FROM node:[$]{NODE[0-9]*_VERSION}' "$f" | sed 's/^FROM node:[$]{//; s/}$//' | sort -u); do
+              pin=$(grep -m1 "^ARG $arg=" Dockerfile.unified) || { echo "::error::$arg is not pinned in Dockerfile.unified" >&2; exit 1; }
+              assert_line "$pin" "$f"
+            done
+          done < <(git grep -l '^FROM node:' -- 'Dockerfile*')
           assert_line 'ARG KIRO_CLI_VERSION=2.25.0' Dockerfile Dockerfile.package Dockerfile.unified
           assert_line 'ARG KIRO_SHA256_AMD64=3e924de9697717b99891bb5f7d2a4bd9c768b8bfa1c498b35b3d242948512984' Dockerfile Dockerfile.package Dockerfile.unified
           assert_line 'ARG KIRO_SHA256_ARM64=cc8a2df90cd354b569b81ed4653db4796c86a69866568b4eb7fa7906afc95309' Dockerfile Dockerfile.package Dockerfile.unified
